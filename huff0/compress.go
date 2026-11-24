@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"runtime"
-	"slices"
 	"sync"
 )
 
@@ -273,25 +272,9 @@ func (s *Scratch) compress1xDo(dst, src []byte) []byte {
 	}
 	n -= 4
 
-	// flush leaves at most 7 bits, so four symbols (at most 4*tableLogMax
-	// bits) always fit. Each chunk checks room for bytesPer4 per four
-	// symbols plus the 8-byte store.
-	const bytesPer4 = (7 + 4*tableLogMax) / 8
 	w := bitState{c: bw.bitContainer, nb: uint(bw.nBits), pos: len(bw.out)}
 	buf := bw.out[:cap(bw.out)]
-	for n >= 0 {
-		k := (len(buf) - w.pos - 8) / bytesPer4
-		if k <= 0 {
-			buf = slices.Grow(buf[:w.pos], (n/4+1)*bytesPer4+8)
-			buf = buf[:cap(buf)]
-			continue
-		}
-		for stop := max(n-4*k, -4); n > stop; n -= 4 {
-			w = w.flush(buf)
-			tmp := src[n : n+4]
-			w = w.add(fourSymbols(cTable[tmp[3]], cTable[tmp[2]], cTable[tmp[1]], cTable[tmp[0]]))
-		}
-	}
+	w, buf = compress1xDoLoop(w, buf, src, cTable, n)
 	bw.bitContainer, bw.nBits, bw.out = w.c, uint8(w.nb), buf[:w.pos]
 	bw.close()
 	return bw.out
@@ -383,10 +366,7 @@ func (s *Scratch) compress4Xp(src []byte) ([]byte, error) {
 // Does not update s.clearCount.
 func (s *Scratch) countSimple(in []byte) (max int, reuse bool) {
 	reuse = true
-	_ = s.count // Assert that s != nil to speed up the following loop.
-	for _, v := range in {
-		s.count[v]++
-	}
+	countSimpleHist(in, &s.count)
 	m := uint32(0)
 	if len(s.prevTable) > 0 {
 		for i, v := range s.count[:] {
@@ -537,18 +517,15 @@ func (s *Scratch) buildCTable() error {
 // buildCTableLog builds s.cTable with code lengths limited to s.actualTableLog,
 // which it sets to the longest code.
 func (s *Scratch) buildCTableLog() error {
-	s.huffSort()
+	nonNullRank := s.huffSort()
 	if cap(s.cTable) < maxSymbolValue+1 {
 		s.cTable = make([]cTableEntry, s.symbolLen, maxSymbolValue+1)
 	} else {
 		s.cTable = s.cTable[:s.symbolLen]
-		for i := range s.cTable {
-			s.cTable[i] = cTableEntry{}
-		}
+		clear(s.cTable)
 	}
 
 	var startNode = int16(s.symbolLen)
-	nonNullRank := s.symbolLen - 1
 
 	nodeNb := startNode
 	huffNode := s.nodes[1 : huffNodesLen+1]
@@ -556,10 +533,6 @@ func (s *Scratch) buildCTableLog() error {
 	// This overlays the slice above, but allows "-1" index lookups.
 	// Different from reference implementation.
 	huffNode0 := s.nodes[0 : huffNodesLen+1]
-
-	for huffNode[nonNullRank].count() == 0 {
-		nonNullRank--
-	}
 
 	lowS := int16(nonNullRank)
 	nodeRoot := nodeNb + lowS - 1
@@ -647,8 +620,8 @@ func (s *Scratch) buildCTableLog() error {
 	return nil
 }
 
-// huffSort will sort symbols, decreasing order.
-func (s *Scratch) huffSort() {
+// huffSort sorts non-zero symbols in decreasing order and returns the last non-zero rank.
+func (s *Scratch) huffSort() uint16 {
 	type rankPos struct {
 		base    uint32
 		current uint32
@@ -659,21 +632,29 @@ func (s *Scratch) huffSort() {
 	s.nodes = nodes
 	nodes = nodes[1 : huffNodesLen+1]
 
-	// Sort into buckets based on length of symbol count.
+	// Sort into buckets based on length of symbol count (skip zero-count symbols).
 	var rank [32]rankPos
+	var nonNull uint32
 	for _, v := range s.count[:s.symbolLen] {
+		if v == 0 {
+			continue
+		}
 		r := highBit32(v+1) & 31
 		rank[r].base++
+		nonNull++
 	}
 	// maxBitLength is log2(BlockSizeMax) + 1
 	const maxBitLength = 18 + 1
-	for n := maxBitLength; n > 0; n-- {
+	for n := maxBitLength; n > 1; n-- {
 		rank[n-1].base += rank[n].base
 	}
-	for n := range rank[:maxBitLength] {
+	for n := 1; n < maxBitLength; n++ {
 		rank[n].current = rank[n].base
 	}
 	for n, c := range s.count[:s.symbolLen] {
+		if c == 0 {
+			continue
+		}
 		r := (highBit32(c+1) + 1) & 31
 		pos := rank[r].current
 		rank[r].current++
@@ -685,6 +666,7 @@ func (s *Scratch) huffSort() {
 		}
 		nodes[pos&huffNodesMask] = makeNodeElt(c, byte(n))
 	}
+	return uint16(nonNull - 1)
 }
 
 func (s *Scratch) setMaxHeight(lastNonNull int) uint8 {

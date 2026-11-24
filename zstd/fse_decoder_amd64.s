@@ -51,14 +51,36 @@ init_main_loop_condition:
 	LEAQ -1(AX), R11
 	XORQ R12, R12
 	XORQ R13, R13
-	JMP  spread_main_loop_condition
+	CMPQ R9, R11
+	JNE  spread_slow_loop_condition
+	JMP  spread_fast_loop_condition
 
-spread_main_loop:
-	XORQ    R14, R14
-	MOVWQSX (CX)(R13*2), R15
-	JMP     spread_inner_loop_condition
+spread_fast_loop:
+	MOVWQSX (CX)(R13*2), R9
+	TESTQ   R9, R9
+	JLE     spread_fast_next
 
-spread_inner_loop:
+spread_fast_inner:
+	MOVB R13, 1(SI)(R12*8)
+	ADDQ R10, R12
+	ANDQ R11, R12
+	DECQ R9
+	JNZ  spread_fast_inner
+
+spread_fast_next:
+	INCQ R13
+
+spread_fast_loop_condition:
+	CMPQ R13, R8
+	JL   spread_fast_loop
+	JMP  spread_done
+
+spread_slow_loop:
+	MOVWQSX (CX)(R13*2), R14
+	TESTQ   R14, R14
+	JLE     spread_slow_next
+
+spread_slow_inner:
 	MOVB R13, 1(SI)(R12*8)
 
 adjust_position:
@@ -66,16 +88,17 @@ adjust_position:
 	ANDQ R11, R12
 	CMPQ R12, R9
 	JG   adjust_position
-	INCQ R14
+	DECQ R14
+	JNZ  spread_slow_inner
 
-spread_inner_loop_condition:
-	CMPQ R14, R15
-	JL   spread_inner_loop
+spread_slow_next:
 	INCQ R13
 
-spread_main_loop_condition:
-	CMPQ  R13, R8
-	JL    spread_main_loop
+spread_slow_loop_condition:
+	CMPQ R13, R8
+	JL   spread_slow_loop
+
+spread_done:
 	TESTQ R12, R12
 	JZ    spread_check_ok
 	MOVQ  ctx+8(FP), AX
@@ -98,35 +121,38 @@ build_table_main_table:
 	SUBQ    R11, CX
 	SHLQ    CL, R10
 	SUBQ    AX, R10
-	MOVQ    (DI)(R9*8), R9
-	ORQ     CX, R9
-	MOVQ    R10, R11
-	ANDQ    $0x0000ffff, R11
-	SHLQ    $0x10, R11
-	ORQ     R11, R9
-	MOVQ    R9, (SI)(R8*8)
 	CMPQ    R10, AX
-	JLE     build_table_check1_ok
-	MOVQ    ctx+8(FP), CX
-	MOVQ    R10, 32(CX)
-	MOVQ    AX, 40(CX)
-	MOVQ    $+2, ret+16(FP)
-	RET
+	JA      build_table_err_newstate
+	TESTB   CL, CL
+	JZ      build_table_check_nobits
 
-build_table_check1_ok:
-	TESTB CL, CL
-	JNZ   build_table_check2_ok
-	CMPW  R10, R8
-	JNE   build_table_check2_ok
-	MOVQ  ctx+8(FP), AX
-	MOVQ  R10, 32(AX)
-	MOVQ  R8, 40(AX)
-	MOVQ  $+3, ret+16(FP)
-	RET
-
-build_table_check2_ok:
+build_table_store:
+	MOVQ (DI)(R9*8), R9
+	ORQ  CX, R9
+	SHLQ $0x10, R10
+	ORQ  R10, R9
+	MOVQ R9, (SI)(R8*8)
 	INCQ R8
 	CMPQ R8, AX
 	JL   build_table_main_table
+	JMP  build_table_done
+
+build_table_check_nobits:
+	CMPW R10, R8
+	JNE  build_table_store
+	MOVQ ctx+8(FP), AX
+	MOVQ R10, 32(AX)
+	MOVQ R8, 40(AX)
+	MOVQ $+3, ret+16(FP)
+	RET
+
+build_table_err_newstate:
+	MOVQ ctx+8(FP), CX
+	MOVQ R10, 32(CX)
+	MOVQ AX, 40(CX)
+	MOVQ $+2, ret+16(FP)
+	RET
+
+build_table_done:
 	MOVQ $+0, ret+16(FP)
 	RET

@@ -1,6 +1,7 @@
 package zstd
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/csv"
 	"fmt"
@@ -16,7 +17,6 @@ import (
 
 	"github.com/klauspost/compress/internal/cpuinfo"
 	"github.com/klauspost/compress/internal/silesiatest"
-	"github.com/klauspost/compress/zip"
 )
 
 func TestSequenceDecsAdjustOffset(t *testing.T) {

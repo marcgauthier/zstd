@@ -146,8 +146,9 @@ func (s *sequenceDecs) decodeSyncSimple(hist []byte) (bool, error) {
 
 	s.seqSize = 0
 	startSize := len(s.out)
+	lte56bits := s.maxBits+s.offsets.fse.actualTableLog+s.matchLengths.fse.actualTableLog+s.litLengths.fse.actualTableLog <= 56
 
-	errCode := decodeSyncAsm(s, br, &ctx, useSafe)
+	errCode := decodeSyncAsm(s, br, &ctx, useSafe, lte56bits)
 	switch errCode {
 	case noError:
 		break

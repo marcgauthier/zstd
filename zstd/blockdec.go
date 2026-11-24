@@ -251,23 +251,36 @@ func (b *blockDec) decodeBuf(hist *history) error {
 		return nil
 	case blockTypeCompressed:
 		saved := b.dst
-		// Append directly to history
+		// Append directly to history. When ignoreBuffer > 0 (caller-supplied
+		// prefix or concatenated frames), sub-slice past ignoreBuffer so
+		// matches cannot reach earlier frames while avoiding a copy.
 		if hist.ignoreBuffer == 0 {
 			b.dst = hist.b
 			hist.b = nil
-		} else {
-			b.dst = b.dst[:0]
+			err := b.decodeCompressed(hist)
+			if debugDecoder {
+				println("Decompressed to total", len(b.dst), "bytes, hash:", xxhash.Sum64(b.dst), "error:", err)
+			}
+			hist.b = b.dst
+			b.dst = saved
+			return err
 		}
+		orig := hist.b
+		ignore := hist.ignoreBuffer
+		b.dst = orig[ignore:]
+		hist.b = nil
 		err := b.decodeCompressed(hist)
 		if debugDecoder {
 			println("Decompressed to total", len(b.dst), "bytes, hash:", xxhash.Sum64(b.dst), "error:", err)
 		}
-		if hist.ignoreBuffer == 0 {
-			hist.b = b.dst
-			b.dst = saved
+		if len(b.dst) == 0 {
+			hist.b = orig[:ignore]
+		} else if cap(orig) >= ignore+len(b.dst) && &orig[ignore : ignore+len(b.dst)][0] == &b.dst[0] {
+			hist.b = orig[:ignore+len(b.dst)]
 		} else {
-			hist.appendKeep(b.dst)
+			hist.b = append(orig[:ignore], b.dst...)
 		}
+		b.dst = saved
 		return err
 	case blockTypeReserved:
 		// Used for returning errors.
@@ -503,7 +516,10 @@ func (b *blockDec) decodeCompressed(hist *history) error {
 		return nil
 	}
 	before := len(hist.decoders.out)
-	h := hist.b[hist.ignoreBuffer:]
+	var h []byte
+	if len(hist.b) > hist.ignoreBuffer {
+		h = hist.b[hist.ignoreBuffer:]
+	}
 	if hist.ext != nil {
 		h = hist.ext
 	}

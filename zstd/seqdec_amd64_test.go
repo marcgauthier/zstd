@@ -3,6 +3,7 @@
 package zstd
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/csv"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/klauspost/compress/internal/cpuinfo"
-	"github.com/klauspost/compress/zip"
 )
 
 func Benchmark_seqdec_decodeNoBMI(b *testing.B) {

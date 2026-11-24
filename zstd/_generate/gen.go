@@ -87,15 +87,27 @@ func main() {
 
 	decodeSync := decodeSync{}
 	decodeSync.setBMI2(false)
+	decodeSync.decode.fiftysix = false
 	decodeSync.generateProcedure("sequenceDecs_decodeSync_amd64")
+	decodeSync.decode.fiftysix = true
+	decodeSync.generateProcedure("sequenceDecs_decodeSync_56_amd64")
 	decodeSync.setBMI2(true)
+	decodeSync.decode.fiftysix = false
 	decodeSync.generateProcedure("sequenceDecs_decodeSync_bmi2")
+	decodeSync.decode.fiftysix = true
+	decodeSync.generateProcedure("sequenceDecs_decodeSync_56_bmi2")
 
 	decodeSync.execute.safeMem = true
 	decodeSync.setBMI2(false)
+	decodeSync.decode.fiftysix = false
 	decodeSync.generateProcedure("sequenceDecs_decodeSync_safe_amd64")
+	decodeSync.decode.fiftysix = true
+	decodeSync.generateProcedure("sequenceDecs_decodeSync_safe_56_amd64")
 	decodeSync.setBMI2(true)
+	decodeSync.decode.fiftysix = false
 	decodeSync.generateProcedure("sequenceDecs_decodeSync_safe_bmi2")
+	decodeSync.decode.fiftysix = true
+	decodeSync.generateProcedure("sequenceDecs_decodeSync_safe_56_bmi2")
 
 	Generate()
 }
@@ -138,8 +150,19 @@ type options struct {
 	useSeqs  bool // Generate code that uses the `seqs` auxiliary table
 
 	// Set by generateBody once the frame is laid out.
-	tableSlot map[string]Mem // ctx.<table> base pointers, copied to locals at entry
-	iterSlot  Mem            // ctx.iteration, kept in a local for the whole call
+	tableSlot     map[string]Mem            // ctx.<table> base pointers, copied to locals at entry (!bmi2)
+	tableXMM      map[string]reg.VecVirtual // ctx.<table> base pointers, kept in XMM (bmi2)
+	iterSlot      Mem                       // ctx.iteration, kept in a local for the whole call
+	litRemainSlot Mem                       // ctx.litRemain, kept in a local (!bmi2 || useSeqs)
+	litRemainXMM  reg.VecVirtual            // ctx.litRemain, kept in XMM (bmi2 && !useSeqs)
+	poSlot        [3]Mem                    // s.prevOffset[0..2] (!bmi2 && !useSeqs)
+	poXMM         [3]reg.VecVirtual         // s.prevOffset[0..2] (bmi2 && !useSeqs)
+	moXMM         reg.VecVirtual            // decoded mo across state update (bmi2 && !useSeqs)
+	mlXMM         reg.VecVirtual            // decoded ml across state update (bmi2 && !useSeqs)
+	llXMM         reg.VecVirtual            // decoded ll across state update (bmi2 && !useSeqs)
+	brBaseSlot    Mem                       // &br.in[0] (loop-invariant)
+	brBase8Slot   Mem                       // &br.in[0] + 8 (loop-invariant; brPointer >= brBase8 <=> brOffset >= 8)
+	coldBlocks    *[]func()                 // out-of-line cold code emitted after loop_finished
 }
 
 func (o options) genDecodeSeqAsm(name string) {
@@ -157,7 +180,7 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 	// registers used by `decode`
 	brValue := GP64()
 	brBitsRead := GP64()
-	brOffset := GP64()
+	brPointer := GP64()
 	llState := GP64()
 	mlState := GP64()
 	ofState := GP64()
@@ -167,16 +190,31 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 	ec := executeSingleTripleContext{}
 
 	// 1. load bitReader (done once)
-	brPointerStash := AllocLocal(8)
+	var coldBlocks []func()
+	o.coldBlocks = &coldBlocks
 	{
 		br := Dereference(Param("br"))
-		brPointer := GP64()
+		brBase := GP64()
+		brOff := GP64()
 		Load(br.Field("value"), brValue)
 		Load(br.Field("bitsRead"), brBitsRead)
-		Load(br.Field("in").Base(), brPointer)
-		Load(br.Field("cursor"), brOffset)
-		ADDQ(brOffset, brPointer) // Add current offset to read pointer.
-		MOVQ(brPointer, brPointerStash)
+		Load(br.Field("in").Base(), brBase)
+		Load(br.Field("cursor"), brOff)
+		o.brBaseSlot = AllocLocal(8)
+		o.brBase8Slot = AllocLocal(8)
+		MOVQ(brBase, o.brBaseSlot)
+		LEAQ(Mem{Base: brBase, Disp: 8}, brPointer)
+		MOVQ(brPointer, o.brBase8Slot)
+		LEAQ(Mem{Base: brBase, Index: brOff, Scale: 1}, brPointer) // brPointer = &br.in[cursor]
+		if o.bmi2 {
+			// Maintain MSB-aligned brValue: unread bits live in [63:brBitsRead],
+			// lower brBitsRead bits are zero. Zero brValue if brBitsRead >= 64.
+			zero := GP64()
+			XORQ(zero, zero)
+			SHLXQ(brBitsRead, brValue, brValue)
+			CMPQ(brBitsRead, U8(64))
+			CMOVQCC(zero, brValue)
+		}
 	}
 
 	// 2. load states (done once)
@@ -191,24 +229,44 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 		Load(ctx.Field("ofState"), ofState)
 
 		// The table base pointers and the iteration counter live in ctx, and
-		// the loop cannot spare registers for them. Reading them through ctx
-		// costs a dependent pair of loads (ctx from the frame, then the field)
-		// at every use -- three tables plus two counter accesses per
-		// sequence. A local slot is one load. The counter is written back to
-		// ctx on every exit where the caller reads it (see returnWithCode).
-		o.tableSlot = make(map[string]Mem)
-		for _, table := range []string{"llTable", "mlTable", "ofTable"} {
-			tmp := GP64()
-			Load(ctx.Field(table).Base(), tmp)
-			slot := AllocLocal(8)
-			MOVQ(tmp, slot)
-			o.tableSlot[table] = slot
+		// the loop cannot spare registers for them. On BMI2 (amd64-only) keep
+		// table pointers in XMM registers to avoid L1 load port contention; on
+		// generic/arm64 keep them in local stack slots (promoted to arm64 regs).
+		if o.bmi2 {
+			o.tableXMM = make(map[string]reg.VecVirtual)
+			for _, table := range []string{"llTable", "mlTable", "ofTable"} {
+				tmp := GP64()
+				Load(ctx.Field(table).Base(), tmp)
+				x := XMM()
+				MOVQ(tmp, x)
+				o.tableXMM[table] = x
+			}
+		} else {
+			o.tableSlot = make(map[string]Mem)
+			for _, table := range []string{"llTable", "mlTable", "ofTable"} {
+				tmp := GP64()
+				Load(ctx.Field(table).Base(), tmp)
+				slot := AllocLocal(8)
+				MOVQ(tmp, slot)
+				o.tableSlot[table] = slot
+			}
 		}
 		{
 			tmp := GP64()
 			Load(ctx.Field("iteration"), tmp)
 			o.iterSlot = AllocLocal(8)
 			MOVQ(tmp, o.iterSlot)
+		}
+		{
+			tmp := GP64()
+			Load(ctx.Field("litRemain"), tmp)
+			if o.bmi2 && !o.useSeqs {
+				o.litRemainXMM = XMM()
+				MOVQ(tmp, o.litRemainXMM)
+			} else {
+				o.litRemainSlot = AllocLocal(8)
+				MOVQ(tmp, o.litRemainSlot)
+			}
 		}
 
 		if o.useSeqs {
@@ -218,17 +276,23 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 			mlP = Mem{Base: seqBase, Disp: 1 * 8} // Pointer to current ml
 			llP = Mem{Base: seqBase, Disp: 0 * 8} // Pointer to current ll
 		} else {
-			moP = AllocLocal(8)
-			mlP = AllocLocal(8)
-			llP = AllocLocal(8)
-			ec.moPtr = moP
-			ec.mlPtr = mlP
-			ec.llPtr = llP
-			zero := GP64()
-			XORQ(zero, zero)
-			MOVQ(zero, moP)
-			MOVQ(zero, mlP)
-			MOVQ(zero, llP)
+			if o.bmi2 {
+				o.moXMM = XMM()
+				o.mlXMM = XMM()
+				o.llXMM = XMM()
+			} else {
+				moP = AllocLocal(8)
+				mlP = AllocLocal(8)
+				llP = AllocLocal(8)
+				ec.moPtr = moP
+				ec.mlPtr = mlP
+				ec.llPtr = llP
+				zero := GP64()
+				XORQ(zero, zero)
+				MOVQ(zero, moP)
+				MOVQ(zero, mlP)
+				MOVQ(zero, llP)
+			}
 
 			ec.outBase = GP64()
 			ec.outEndPtr = AllocLocal(8)
@@ -267,18 +331,30 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 		}
 	}
 
-	// Store previous offsets in registers.
+	// Store previous offsets in registers (useSeqs), XMM (bmi2 decodeSync),
+	// or 3 distinct 8-byte local slots (generic/arm64 decodeSync).
 	var offsets [3]reg.GPVirtual
-	if o.useSeqs {
+	{
 		s := Dereference(Param("s"))
 		for i := range offsets {
-			offsets[i] = GP64()
 			po, err := s.Field("prevOffset").Index(i).Resolve()
 			if err != nil {
 				panic(err)
 			}
-
-			MOVQ(po.Addr, offsets[i])
+			if o.useSeqs {
+				offsets[i] = GP64()
+				MOVQ(po.Addr, offsets[i])
+			} else if o.bmi2 {
+				tmp := GP64()
+				MOVQ(po.Addr, tmp)
+				o.poXMM[i] = XMM()
+				MOVQ(tmp, o.poXMM[i])
+			} else {
+				tmp := GP64()
+				MOVQ(po.Addr, tmp)
+				o.poSlot[i] = AllocLocal(8)
+				MOVQ(tmp, o.poSlot[i])
+			}
 		}
 	}
 
@@ -290,41 +366,38 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 	PCALIGN(U8(64))
 	Label(name + "_main_loop")
 
-	{
-		brPointer := GP64()
-		MOVQ(brPointerStash, brPointer)
+	var ofAddBitsXMM reg.VecVirtual
+	if o.bmi2 {
+		ofAddBitsXMM = XMM()
+	}
 
+	{
 		Comment("Fill bitreader to have enough for the offset and match length.")
-		o.bitreaderFill(name+"_fill", brValue, brBitsRead, brOffset, brPointer, LabelRef("error_overread"))
+		o.bitreaderFillOutOfLine(name+"_fill", brValue, brBitsRead, brPointer, LabelRef("error_overread"))
 
 		Comment("Update offset")
 		// Up to 32 extra bits
-		o.updateLength(name+"_of_update", brValue, brBitsRead, ofState, moP)
+		o.updateLength(name+"_of_update", brValue, brBitsRead, ofState, moP, o.moXMM, ofAddBitsXMM)
 
 		Comment("Update match length")
 		// Up to 16 extra bits
-		o.updateLength(name+"_ml_update", brValue, brBitsRead, mlState, mlP)
+		o.updateLength(name+"_ml_update", brValue, brBitsRead, mlState, mlP, o.mlXMM, nil)
 
-		// If we need more than 56 in total, we must refill here.
+		// If we need more than 56 in total, refill unconditionally (zero branch
+		// mispredictions; byte-by-byte tail is out of line).
 		if !o.fiftysix {
 			Comment("Fill bitreader to have enough for the remaining")
-			o.bitreaderFill(name+"_fill_2", brValue, brBitsRead, brOffset, brPointer, LabelRef("error_overread"))
+			o.bitreaderFillOutOfLine(name+"_fill_2", brValue, brBitsRead, brPointer, LabelRef("error_overread"))
 		}
 
 		Comment("Update literal length")
 		// Up to 16 bits
-		o.updateLength(name+"_ll_update", brValue, brBitsRead, llState, llP)
-
-		Comment("Fill bitreader for state updates")
-		MOVQ(brPointer, brPointerStash)
+		o.updateLength(name+"_ll_update", brValue, brBitsRead, llState, llP, o.llXMM, nil)
 	}
 
-	R14 := GP64()
-	if o.bmi2 {
-		tmp := GP64()
-		MOVQ(U32(8|(8<<8)), tmp)
-		BEXTRQ(tmp, ofState, R14)
-	} else {
+	var R14 reg.GPVirtual
+	if !o.bmi2 {
+		R14 = GP64()
 		MOVQ(ofState, R14) // copy ofState, its current value is needed below
 		SHRQ(U8(8), R14)   // moB (from the ofState before its update)
 		MOVBQZX(R14.As8(), R14)
@@ -360,15 +433,13 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 				nBits := mlState
 				lowBits := GP64()
 				BZHIQ(nBits, bits, lowBits) // lowBits = bits & ((1 << nBits) - 1))
-				SHRXQ(nBits, bits, bits)    // lowBits >>= nBits
+				SHRXQ(nBits, bits, bits)    // bits >>= nBits
 				o.nextState(mlState, lowBits, "mlTable")
 			}
 			Comment("Update Literal Length State")
 			{
-				nBits := llState
-				lowBits := GP64()
-				BZHIQ(nBits, bits, lowBits) // lowBits = bits & ((1 << nBits) - 1))
-				o.nextState(llState, lowBits, "llTable")
+				// Remaining bits already contain only llNBits (all upper bits are 0).
+				o.nextState(llState, bits, "llTable")
 			}
 		} else {
 			Comment("Update Literal Length State")
@@ -381,24 +452,38 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 	}
 	Label(name + "_skip_update")
 
+	if o.bmi2 {
+		R14 = GP64()
+		MOVQ(ofAddBitsXMM, R14)
+	}
+
 	Comment("Adjust offset")
 
 	var offset reg.GPVirtual
 	end := LabelRef(name + "_after_adjust")
 	if o.useSeqs {
 		offset = o.adjustOffset(name+"_adjust", moP, llP, R14, &offsets, end)
+	} else if o.bmi2 {
+		offset = o.adjustOffsetXMM(name+"_adjust", R14, end)
 	} else {
 		offset = o.adjustOffsetInMemory(name+"_adjust", moP, llP, R14, end)
 	}
 	Label(name + "_after_adjust")
 
-	MOVQ(offset, moP) // Store offset
+	if o.useSeqs {
+		MOVQ(offset, moP) // Store offset
+	}
 
 	Comment("Check values")
 	ml := GP64()
-	MOVQ(mlP, ml)
 	ll := GP64()
-	MOVQ(llP, ll)
+	if o.bmi2 && !o.useSeqs {
+		MOVQ(o.mlXMM, ml)
+		MOVQ(o.llXMM, ll)
+	} else {
+		MOVQ(mlP, ml)
+		MOVQ(llP, ll)
+	}
 
 	// Update length
 	if o.useSeqs {
@@ -416,14 +501,16 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 	// instead of a load/add/store on s.seqSize per sequence. The caller reads
 	// seqSize only on success.
 
-	// Reload ctx
-	ctx := Dereference(Param("ctx"))
-	litRemainP, err := ctx.Field("litRemain").Resolve()
-	if err != nil {
-		panic(err)
+	if o.bmi2 && !o.useSeqs {
+		lr := GP64()
+		MOVQ(o.litRemainXMM, lr)
+		SUBQ(ll, lr)
+		MOVQ(lr, o.litRemainXMM) // MOVQ does not modify flags
+		JS(LabelRef("error_not_enough_literals"))
+	} else {
+		SUBQ(ll, o.litRemainSlot) // litRemain -= ll
+		JS(LabelRef("error_not_enough_literals"))
 	}
-	SUBQ(ll, litRemainP.Addr) // ctx.litRemain -= ll
-	JS(LabelRef("error_not_enough_literals"))
 	{
 		// 	if ml > maxMatchLen {
 		//		return fmt.Errorf("match len (%d) bigger than max allowed length", ml)
@@ -436,16 +523,21 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 		//		return fmt.Errorf("zero matchoff and matchlen (%d) > 0", ml)
 		//	}
 		TESTQ(offset, offset)
-		JNZ(LabelRef(name + "_match_len_ofs_ok")) // mo != 0
-		TESTQ(ml, ml)
-		JNZ(LabelRef(name + "_error_match_len_ofs_mismatch"))
+		JZ(LabelRef(name + "_check_ml_zero"))
+		*o.coldBlocks = append(*o.coldBlocks, func() {
+			Label(name + "_check_ml_zero")
+			TESTQ(ml, ml)
+			JNZ(LabelRef(name + "_error_match_len_ofs_mismatch"))
+			JMP(LabelRef(name + "_match_len_ofs_ok"))
+		})
 	}
 
 	Label(name + "_match_len_ofs_ok")
 
 	if !o.useSeqs {
 		handleLoop := func() {
-			JMP(LabelRef("handle_loop"))
+			DECQ(o.iterSlot)
+			JNS(LabelRef(name + "_main_loop"))
 		}
 
 		// The checks above already hold ll, mo and ml in registers; hand
@@ -465,19 +557,50 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 	Label("loop_finished")
 
 	// Store offsets
-	if o.useSeqs {
+	{
 		s := Dereference(Param("s"))
 		for i := range offsets {
 			po, _ := s.Field("prevOffset").Index(i).Resolve()
-			MOVQ(offsets[i], po.Addr)
+			if o.useSeqs {
+				MOVQ(offsets[i], po.Addr)
+			} else if o.bmi2 {
+				tmp := GP64()
+				MOVQ(o.poXMM[i], tmp)
+				MOVQ(tmp, po.Addr)
+			} else {
+				tmp := GP64()
+				MOVQ(o.poSlot[i], tmp)
+				MOVQ(tmp, po.Addr)
+			}
 		}
 	}
 
+	// Write back litRemain to ctx
+	{
+		tmp := GP64()
+		if o.bmi2 && !o.useSeqs {
+			MOVQ(o.litRemainXMM, tmp)
+		} else {
+			MOVQ(o.litRemainSlot, tmp)
+		}
+		ctx := Dereference(Param("ctx"))
+		Store(tmp, ctx.Field("litRemain"))
+	}
+
 	// update bitreader state before returning
+	if o.bmi2 {
+		// Restore non-MSB-aligned br.value so (value << bitsRead) holds unread bits.
+		zero := GP64()
+		XORQ(zero, zero)
+		SHRXQ(brBitsRead, brValue, brValue)
+		CMPQ(brBitsRead, U8(64))
+		CMOVQCC(zero, brValue)
+	}
 	br := Dereference(Param("br"))
 	Store(brValue, br.Field("value"))
 	Store(brBitsRead.As8(), br.Field("bitsRead"))
-	Store(brOffset, br.Field("cursor"))
+	SUBQ(o.brBaseSlot, brPointer) // cursor = brPointer - &br.in[0]
+	Store(brPointer, br.Field("cursor"))
 
 	if !o.useSeqs {
 		Comment("s.seqSize += outPosition - ctx.outPosition")
@@ -512,12 +635,21 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 	Comment("Return success")
 	o.returnWithCode(0)
 
+	// Emit out-of-line cold paths (byte-by-byte fill, rare fill #2, mo==0 check).
+	for _, emit := range *o.coldBlocks {
+		emit()
+	}
+
 	Comment("Return with match length error")
 	{
 		Label(name + "_error_match_len_ofs_mismatch")
 		if !o.useSeqs {
 			tmp := GP64()
-			MOVQ(mlP, tmp)
+			if o.bmi2 {
+				MOVQ(o.mlXMM, tmp)
+			} else {
+				MOVQ(mlP, tmp)
+			}
 			ctx := Dereference(Param("ctx"))
 			Store(tmp, ctx.Field("ml"))
 		}
@@ -530,7 +662,11 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 		if !o.useSeqs {
 			ctx := Dereference(Param("ctx"))
 			tmp := GP64()
-			MOVQ(mlP, tmp)
+			if o.bmi2 {
+				MOVQ(o.mlXMM, tmp)
+			} else {
+				MOVQ(mlP, tmp)
+			}
 			Store(tmp, ctx.Field("ml"))
 		}
 		o.returnWithCode(errorMatchLenTooBig)
@@ -541,9 +677,7 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 		Label("error_match_off_too_big")
 		if !o.useSeqs {
 			ctx := Dereference(Param("ctx"))
-			tmp := GP64()
-			MOVQ(moP, tmp)
-			Store(tmp, ctx.Field("mo"))
+			// ctx.mo was stored by executeSingleTriple's cold error stub.
 			Store(ec.outPosition, ctx.Field("outPosition"))
 		}
 		o.returnWithCode(errorMatchOffTooBig)
@@ -552,13 +686,21 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 	Comment("Return with not enough literals error")
 	{
 		Label("error_not_enough_literals")
-		if !o.useSeqs {
-			ctx := Dereference(Param("ctx"))
-			tmp := GP64()
-			MOVQ(llP, tmp)
+		ctx := Dereference(Param("ctx"))
+		tmp := GP64()
+		if o.bmi2 && !o.useSeqs {
+			MOVQ(o.litRemainXMM, tmp)
+			Store(tmp, ctx.Field("litRemain"))
+			MOVQ(o.llXMM, tmp)
 			Store(tmp, ctx.Field("ll"))
+		} else {
+			MOVQ(o.litRemainSlot, tmp)
+			Store(tmp, ctx.Field("litRemain"))
+			if !o.useSeqs {
+				MOVQ(llP, tmp)
+				Store(tmp, ctx.Field("ll"))
+			}
 		}
-		// Note: the `litRemain` field is updated in-place (for both useSeqs values)
 
 		o.returnWithCode(errorNotEnoughLiterals)
 	}
@@ -575,10 +717,17 @@ func (o options) generateBody(name string, executeSingleTriple func(ctx *execute
 		{
 			ctx := Dereference(Param("ctx"))
 			tmp := GP64()
-			MOVQ(llP, tmp)
-			Store(tmp, ctx.Field("ll"))
-			MOVQ(mlP, tmp)
-			Store(tmp, ctx.Field("ml"))
+			if o.bmi2 {
+				MOVQ(o.llXMM, tmp)
+				Store(tmp, ctx.Field("ll"))
+				MOVQ(o.mlXMM, tmp)
+				Store(tmp, ctx.Field("ml"))
+			} else {
+				MOVQ(llP, tmp)
+				Store(tmp, ctx.Field("ll"))
+				MOVQ(mlP, tmp)
+				Store(tmp, ctx.Field("ml"))
+			}
 			Store(ec.outPosition, ctx.Field("outPosition"))
 
 			o.returnWithCode(errorNotEnoughSpace)
@@ -602,69 +751,83 @@ func (o options) returnWithCode(returnCode uint32) {
 	RET()
 }
 
-// bitreaderFill will make sure at least 56 bits are available.
-func (o options) bitreaderFill(name string, brValue, brBitsRead, brOffset, brPointer reg.GPVirtual, overread LabelRef) {
-	// bitreader_fill begin
-	CMPQ(brOffset, U8(8)) //  b.off >= 8
-	JL(LabelRef(name + "_byte_by_byte"))
+// bitreaderFillOutOfLine emits only the 8-byte fast path inline (zero taken
+// jumps when brPointer >= brBase+8) and places the byte-by-byte tail out of line.
+// Keeping brPointer directly in a GP register eliminates the XMM/stack stash
+// round-trip and separate brOffset subtraction on every fill.
+func (o options) bitreaderFillOutOfLine(name string, brValue, brBitsRead, brPointer reg.GPVirtual, overread LabelRef) {
+	CMPQ(brPointer, o.brBase8Slot)
+	JB(LabelRef(name + "_byte_by_byte"))
 
 	off := GP64()
 	MOVQ(brBitsRead, off)
 	SHRQ(U8(3), off)                    // off = brBitsRead / 8
 	SUBQ(off, brPointer)                // brPointer = brPointer - off
 	MOVQ(Mem{Base: brPointer}, brValue) // brValue = brPointer[0]
-	SUBQ(off, brOffset)                 // brOffset = brOffset - off
 	ANDQ(U8(7), brBitsRead)             // brBitsRead = brBitsRead & 7
-	JMP(LabelRef(name + "_end"))
-
-	Label(name + "_byte_by_byte")
-	CMPQ(brOffset, U8(0)) /* for b.off > 0 */
-	JLE(LabelRef(name + "_check_overread"))
-
-	CMPQ(brBitsRead, U8(7)) /* for brBitsRead > 7 */
-	JLE(LabelRef(name + "_end"))
-
-	SHLQ(U8(8), brValue) /* b.value << 8 | uint8(mem) */
-	SUBQ(U8(1), brPointer)
-	SUBQ(U8(1), brOffset)
-	SUBQ(U8(8), brBitsRead)
-
-	if false {
-		// Appears slightly worse (AMD Zen2)
-		MOVB(Mem{Base: brPointer}, brValue.As8L())
-	} else {
-		tmp := GP64()
-		MOVBQZX(Mem{Base: brPointer}, tmp)
-		ORQ(tmp, brValue)
+	if o.bmi2 {
+		SHLXQ(brBitsRead, brValue, brValue) // MSB-align brValue
 	}
-	JMP(LabelRef(name + "_byte_by_byte"))
-
-	Label(name + "_check_overread")
-	CMPQ(brBitsRead, U8(64))
-	JA(overread)
-
 	Label(name + "_end")
+
+	*o.coldBlocks = append(*o.coldBlocks, func() {
+		Label(name + "_byte_by_byte")
+		Label(name + "_bbb_loop")
+		CMPQ(brPointer, o.brBaseSlot) /* for brPointer > brBase */
+		JBE(LabelRef(name + "_check_overread"))
+
+		CMPQ(brBitsRead, U8(7)) /* for brBitsRead > 7 */
+		JLE(LabelRef(name + "_end"))
+
+		SUBQ(U8(1), brPointer)
+		SUBQ(U8(8), brBitsRead)
+
+		if o.bmi2 {
+			tmp := GP64()
+			MOVBQZX(Mem{Base: brPointer}, tmp)
+			SHLXQ(brBitsRead, tmp, tmp)
+			ORQ(tmp, brValue)
+		} else {
+			SHLQ(U8(8), brValue)
+			tmp := GP64()
+			MOVBQZX(Mem{Base: brPointer}, tmp)
+			ORQ(tmp, brValue)
+		}
+		JMP(LabelRef(name + "_bbb_loop"))
+
+		Label(name + "_check_overread")
+		CMPQ(brBitsRead, U8(64))
+		JA(overread)
+		JMP(LabelRef(name + "_end"))
+	})
 }
 
-func (o options) updateLength(name string, brValue, brBitsRead, state reg.GPVirtual, out Mem) {
+func (o options) updateLength(name string, brValue, brBitsRead, state reg.GPVirtual, outMem Mem, outXMM reg.VecVirtual, saveAddBitsXMM reg.VecVirtual) {
 	if o.bmi2 {
-		DX := GP64()
-		extr := GP64()
-		MOVQ(U32(8|(8<<8)), extr)
-		BEXTRQ(extr, state, DX) // addBits = (state >> 8) &xff
-		BX := GP64()
-		MOVQ(brValue, BX)
-		// TODO: We should be able to extra bits with BEXTRQ
-		CX := reg.CL
-		LEAQ(Mem{Base: brBitsRead, Index: DX, Scale: 1}, CX.As64()) // CX: shift = r.bitsRead + n
-		ROLQ(CX, BX)
-		BZHIQ(DX.As64(), BX, BX)
-		MOVQ(CX.As64(), brBitsRead) // br.bitsRead += moB
-		res := GP64()               // AX
-		MOVQ(state, res)
-		SHRQ(U8(32), res) // AX = mo (ofState.baselineInt(), that's the higher dword of moState)
-		ADDQ(BX, res)     // AX - mo + br.getBits(moB)
-		MOVQ(res, out)
+		// MSB-aligned brValue: advance brValue in 1 cycle with SHLXQ and
+		// extract top addBits branch-free with SHRQ $1 + XORQ $63 + SHRXQ
+		// (handles addBits == 0 cleanly; avoids 3-uop ROLQ, BEXTRQ, BZHIQ).
+		AX := reg.RAX
+		CX := reg.RCX
+		tmp := GP64()
+		MOVQ(state, AX)
+		MOVBLZX(reg.AH, CX.As32()) // CX = addBits = (state >> 8) & 0xff (no REX)
+		if saveAddBitsXMM != nil {
+			MOVQ(CX, saveAddBitsXMM)
+		}
+		SHRQ(U8(32), AX)            // AX = baseline
+		MOVQ(brValue, tmp)          // copy MSB-aligned brValue
+		SHLXQ(CX, brValue, brValue) // brValue <<= addBits
+		ADDQ(CX, brBitsRead)        // brBitsRead += addBits
+		SHRQ(U8(1), tmp)            // 1 bit of 64-n shift
+		XORQ(U8(63), CX)            // CX = 63 - addBits
+		SHRXQ(CX, tmp, tmp)         // tmp = br.getBits(addBits)
+		ADDQ(tmp, AX)               // AX = baseline + bits
+		if outXMM != nil {
+			MOVQ(AX, outXMM)
+		} else {
+			MOVQ(AX, outMem)
+		}
 	} else {
 		// Branch-free: the same value as bitReader.getBits for every n the
 		// tables can hold (addBits is at most 30, see fseDecoder.transform),
@@ -691,7 +854,7 @@ func (o options) updateLength(name string, brValue, brBitsRead, state reg.GPVirt
 		XORQ(U8(63), CX.As64())       // CX = 63 - n
 		SHRQ(CX, BX)                  // BX = br.getBits(n)
 		ADDQ(BX, AX)                  // AX = baseline + br.getBits(n)
-		MOVQ(AX, out)                 // Store result
+		MOVQ(AX, outMem)              // Store result
 	}
 }
 
@@ -742,7 +905,11 @@ func (o options) nextState(state, lowBits reg.GPVirtual, table string) {
 	// Load table pointer
 	tablePtr := GP64()
 	Comment("Load ctx." + table)
-	MOVQ(o.tableSlot[table], tablePtr)
+	if o.bmi2 {
+		MOVQ(o.tableXMM[table], tablePtr)
+	} else {
+		MOVQ(o.tableSlot[table], tablePtr)
+	}
 
 	// Check if below tablelog
 	assert(func(ok LabelRef) {
@@ -754,22 +921,23 @@ func (o options) nextState(state, lowBits reg.GPVirtual, table string) {
 }
 
 // getBits will return nbits bits from brValue. nBits must be below 64.
-// The generic path clobbers nBits.
+// Clobbers nBits.
 func (o options) getBits(nBits, brValue, brBitsRead reg.GPVirtual) reg.GPVirtual {
 	BX := GP64()
-	CX := reg.CL
 
 	if o.bmi2 {
-		LEAQ(Mem{Base: brBitsRead, Index: nBits, Scale: 1}, CX.As64())
 		MOVQ(brValue, BX)
-		MOVQ(CX.As64(), brBitsRead)
-		ROLQ(CX, BX)
-		BZHIQ(nBits, BX, BX) // BX &= (1<<nBits) - 1
+		SHLXQ(nBits, brValue, brValue)
+		ADDQ(nBits, brBitsRead)
+		SHRQ(U8(1), BX)
+		XORQ(U8(63), nBits)
+		SHRXQ(nBits, BX, BX)
 	} else {
 		// Same shape as updateLength: shift the wanted bits to the top, then
 		// down by 64-n as a fixed 1 plus a variable 63-n, which is in range
 		// for n == 0. That replaces the rotate and the (1<<n)-1 mask build,
 		// and on arm64 lowers to plain three-operand shifts.
+		CX := reg.CL
 		MOVQ(brBitsRead, CX.As64())
 		MOVQ(brValue, BX)
 		SHLQ(CX, BX)
@@ -890,140 +1058,145 @@ func (o options) adjustOffset(name string, moP, llP Mem, offsetB reg.GPVirtual, 
 	return offset
 }
 
-// adjustOffsetInMemory is an adjustOffset version that does not cache prevOffset values in registers.
-// It fetches and stores values directly into the fields of `sequenceDecs` structure.
-func (o options) adjustOffsetInMemory(name string, moP, llP Mem, offsetB reg.GPVirtual, end LabelRef) (offset reg.GPVirtual) {
-	s := Dereference(Param("s"))
-
-	po0, _ := s.Field("prevOffset").Index(0).Resolve()
-	po1, _ := s.Field("prevOffset").Index(1).Resolve()
-	po2, _ := s.Field("prevOffset").Index(2).Resolve()
+// adjustOffsetXMM keeps prevOffset[0..2] in XMM registers on BMI2 decodeSync,
+// avoiding the 16-byte MOVUPS store-forwarding stall and all memory traffic.
+// The repeat-offset path (offsetB <= 1) is placed out of line so the common
+// offsetB > 1 path falls straight through with zero taken branches.
+func (o options) adjustOffsetXMM(name string, offsetB reg.GPVirtual, end LabelRef) (offset reg.GPVirtual) {
 	offset = GP64()
-	MOVQ(moP, offset)
-	{
-		// if offsetB > 1 {
-		//     s.prevOffset[2] = s.prevOffset[1]
-		//     s.prevOffset[1] = s.prevOffset[0]
-		//     s.prevOffset[0] = offset
-		//     return offset
-		// }
-		CMPQ(offsetB, U8(1))
-		JBE(LabelRef(name + "_offsetB_1_or_0"))
+	MOVQ(o.moXMM, offset)
+	CMPQ(offsetB, U8(1))
+	JBE(LabelRef(name + "_offsetB_1_or_0"))
 
-		tmp := XMM()
-		MOVUPS(po0.Addr, tmp)  // tmp = (s.prevOffset[0], s.prevOffset[1])
-		MOVQ(offset, po0.Addr) // s.prevOffset[0] = offset
-		MOVUPS(tmp, po1.Addr)  // s.prevOffset[1], s.prevOffset[2] = s.prevOffset[0], s.prevOffset[1]
-		JMP(end)
-	}
+	MOVOA(o.poXMM[1], o.poXMM[2]) // prevOffset[2] = prevOffset[1] (0c move elim)
+	MOVOA(o.poXMM[0], o.poXMM[1]) // prevOffset[1] = prevOffset[0] (0c move elim)
+	MOVQ(offset, o.poXMM[0])      // prevOffset[0] = offset
 
-	Label(name + "_offsetB_1_or_0")
-	// if litLen == 0 {
-	//     offset++
-	// }
-
-	{
-		CMPQ(llP, U32(0))
-		JNE(LabelRef(name + "_offset_maybezero"))
-		INCQ(offset)
-		JMP(LabelRef(name + "_offset_nonzero"))
-
-		// if offset == 0 {
-		//     return s.prevOffset[0]
-		// }
+	*o.coldBlocks = append(*o.coldBlocks, func() {
+		Label(name + "_offsetB_1_or_0")
 		{
+			ll := GP64()
+			MOVQ(o.llXMM, ll)
+			TESTQ(ll, ll)
+			JNE(LabelRef(name + "_offset_maybezero"))
+			INCQ(offset)
+			JMP(LabelRef(name + "_offset_nonzero"))
+
 			Label(name + "_offset_maybezero")
 			TESTQ(offset, offset)
 			JNZ(LabelRef(name + "_offset_nonzero"))
-			MOVQ(po0.Addr, offset)
+			MOVQ(o.poXMM[0], offset)
 			JMP(end)
 		}
-	}
-	Label(name + "_offset_nonzero")
-	{
-		// Offset must be 1 -> 3
-		assert(func(ok LabelRef) {
-			// Test is above or equal (shouldn't be equal)
-			CMPQ(offset, U32(0))
-			JAE(ok)
-		})
-		assert(func(ok LabelRef) {
-			// Check if Above 0.
-			CMPQ(offset, U32(0))
-			JA(ok)
-		})
-		assert(func(ok LabelRef) {
-			// Check if Below or Equal to 3.
-			CMPQ(offset, U32(3))
-			JBE(ok)
-		})
-		// if offset == 3 {
-		//     temp = s.prevOffset[0] - 1
-		// } else {
-		//     temp = s.prevOffset[offset]
-		// }
-		//
-		// this if got transformed into:
-		//
-		// ofs   := offset
-		// shift := 0
-		// if offset == 3 {
-		//     ofs   = 0
-		//     shift = -1
-		// }
-		// temp := s.prevOffset[ofs] + shift
-		// TODO: This should be easier...
-		CX, DX, R15 := GP64(), GP64(), GP64()
-		MOVQ(offset, CX)
-		XORQ(DX, DX)
-		MOVQ(I32(-1), R15)
-		CMPQ(offset, U8(3))
-		CMOVQEQ(DX, CX)
-		CMOVQEQ(R15, DX)
-		assert(func(ok LabelRef) {
-			CMPQ(CX, U32(0))
-			JAE(ok)
-		})
-		assert(func(ok LabelRef) {
-			CMPQ(CX, U32(3))
-			JB(ok)
-		})
-		if po0.Addr.Index != nil {
-			// Use temporary (not currently needed)
-			prevOffset := GP64()
-			LEAQ(po0.Addr, prevOffset) // &prevOffset[0]
-			ADDQ(Mem{Base: prevOffset, Index: CX, Scale: 8}, DX)
-		} else {
-			ADDQ(Mem{Base: po0.Addr.Base, Disp: po0.Addr.Disp, Index: CX, Scale: 8}, DX)
+
+		Label(name + "_offset_nonzero")
+		{
+			// offset is in {1, 2, 3}.
+			temp := GP64()
+			CMPQ(offset, U8(1))
+			JEQ(LabelRef(name + "_one"))
+			CMPQ(offset, U8(2))
+			JEQ(LabelRef(name + "_two"))
+
+			// offset == 3: temp = prevOffset[0] - 1 (clamped to 1)
+			MOVQ(o.poXMM[0], temp)
+			DECQ(temp)
+			JNZ(LabelRef(name + "_shift_all"))
+			MOVQ(U32(1), temp)
+			JMP(LabelRef(name + "_shift_all"))
+
+			Label(name + "_one")
+			MOVQ(o.poXMM[1], temp)
+			MOVOA(o.poXMM[0], o.poXMM[1])
+			MOVQ(temp, o.poXMM[0])
+			MOVQ(temp, offset)
+			JMP(end)
+
+			Label(name + "_two")
+			MOVQ(o.poXMM[2], temp)
+
+			Label(name + "_shift_all")
+			MOVOA(o.poXMM[1], o.poXMM[2])
+			MOVOA(o.poXMM[0], o.poXMM[1])
+			MOVQ(temp, o.poXMM[0])
+			MOVQ(temp, offset)
+		}
+		JMP(end)
+	})
+	return offset
+}
+
+// adjustOffsetInMemory keeps prevOffset[0..2] in three separate 8-byte local
+// stack slots (no 16-byte MOVUPS store-forwarding stall on amd64; promoted to
+// GP registers by avo on arm64). Repeat offsets are placed out of line.
+func (o options) adjustOffsetInMemory(name string, moP, llP Mem, offsetB reg.GPVirtual, end LabelRef) (offset reg.GPVirtual) {
+	offset = GP64()
+	MOVQ(moP, offset)
+	CMPQ(offsetB, U8(1))
+	JBE(LabelRef(name + "_offsetB_1_or_0"))
+
+	t0, t1 := GP64(), GP64()
+	MOVQ(o.poSlot[1], t1)
+	MOVQ(o.poSlot[0], t0)
+	MOVQ(t1, o.poSlot[2])
+	MOVQ(t0, o.poSlot[1])
+	MOVQ(offset, o.poSlot[0])
+
+	*o.coldBlocks = append(*o.coldBlocks, func() {
+		Label(name + "_offsetB_1_or_0")
+		{
+			CMPQ(llP, U32(0))
+			JNE(LabelRef(name + "_offset_maybezero"))
+			INCQ(offset)
+			JMP(LabelRef(name + "_offset_nonzero"))
+
+			Label(name + "_offset_maybezero")
+			TESTQ(offset, offset)
+			JNZ(LabelRef(name + "_offset_nonzero"))
+			MOVQ(o.poSlot[0], offset)
+			JMP(end)
 		}
 
-		temp := DX
-		// if temp == 0 {
-		//     temp = 1
-		// }
-		JNZ(LabelRef(name + "_temp_valid"))
-		MOVQ(U32(1), temp)
+		Label(name + "_offset_nonzero")
+		{
+			// offset is in {1, 2, 3}.
+			temp := GP64()
+			CMPQ(offset, U8(1))
+			JEQ(LabelRef(name + "_one"))
+			CMPQ(offset, U8(2))
+			JEQ(LabelRef(name + "_two"))
 
-		Label(name + "_temp_valid")
-		// if offset != 1 {
-		//     s.prevOffset[2] = s.prevOffset[1]
-		// }
-		CMPQ(offset, U8(1))
-		JZ(LabelRef(name + "_skip"))
-		tmp := GP64()
-		MOVQ(po1.Addr, tmp)
-		MOVQ(tmp, po2.Addr) // s.prevOffset[2] = s.prevOffset[1]
+			// offset == 3: temp = prevOffset[0] - 1 (clamped to 1)
+			MOVQ(o.poSlot[0], temp)
+			DECQ(temp)
+			JNZ(LabelRef(name + "_shift_all"))
+			MOVQ(U32(1), temp)
+			JMP(LabelRef(name + "_shift_all"))
 
-		Label(name + "_skip")
-		// s.prevOffset[1] = s.prevOffset[0]
-		// s.prevOffset[0] = temp
-		tmp = GP64()
-		MOVQ(po0.Addr, tmp)
-		MOVQ(tmp, po1.Addr)  // s.prevOffset[1] = s.prevOffset[0]
-		MOVQ(temp, po0.Addr) // s.prevOffset[0] = temp
-		MOVQ(temp, offset)   // return temp
-	}
-	JMP(end)
+			Label(name + "_one")
+			t0 := GP64()
+			MOVQ(o.poSlot[1], temp)
+			MOVQ(o.poSlot[0], t0)
+			MOVQ(t0, o.poSlot[1])
+			MOVQ(temp, o.poSlot[0])
+			MOVQ(temp, offset)
+			JMP(end)
+
+			Label(name + "_two")
+			MOVQ(o.poSlot[2], temp)
+
+			Label(name + "_shift_all")
+			t1 := GP64()
+			t2 := GP64()
+			MOVQ(o.poSlot[1], t1)
+			MOVQ(o.poSlot[0], t2)
+			MOVQ(t1, o.poSlot[2])
+			MOVQ(t2, o.poSlot[1])
+			MOVQ(temp, o.poSlot[0])
+			MOVQ(temp, offset)
+		}
+		JMP(end)
+	})
 	return offset
 }
 
@@ -1322,105 +1495,35 @@ func (e executeSimple) executeSingleTriple(c *executeSingleTripleContext, handle
 			JZ(LabelRef("check_offset"))
 			e.copyMemoryPrecise("1", c.literals, c.outBase, ll, 1)
 		} else {
-			// Measured on the benchdecoder corpus, 68% of sequences have no
-			// literals and 99% have at most 16, so the zero test is a
-			// poorly predicted branch and the block loop nearly always runs
-			// exactly once. Copy the first block unconditionally -- an
-			// empty run copies 16 bytes of slack that the match copy then
-			// overwrites -- and loop only for the long tail. The literal
-			// buffer has compressedBlockOverAlloc readable bytes past its
-			// end and the output has the same slack past ll+ml (see
-			// useSafeDecodeSync / executeSimple), which covers the ll == 0
-			// read and write.
-			e.copyMemoryND16("1", c.literals, c.outBase, ll)
+			// Copy the first 16-byte block unconditionally; only jump out-of-line
+			// when ll > 16 (~1% of sequences), keeping the hot path straight-line.
+			t := XMM()
+			MOVUPS(Mem{Base: c.literals}, t)
+			MOVUPS(t, Mem{Base: c.outBase})
+			CMPQ(ll, U8(16))
+			JA(LabelRef("copy_1_long"))
+			Label("copy_1_done")
 			ADDQ(ll, c.literals)
 			ADDQ(ll, c.outBase)
 		}
 		ADDQ(ll, c.outPosition)
 	}
 
-	Comment("Malformed input if seq.mo > t+len(hist) || seq.mo > s.windowSize)")
+	Comment("Check offset bounds and fast-path matches inside current buffer")
 	{
 		Label("check_offset")
-
-		tmp := GP64()
-		if e.useSeqs {
-			LEAQ(Mem{Base: c.outPosition, Index: c.histLen, Scale: 1}, tmp)
-		} else {
-			MOVQ(c.outPosition, tmp)
-			ADDQ(c.histLenPtr, tmp)
-		}
-		CMPQ(mo, tmp)
-		JG(LabelRef("error_match_off_too_big"))
-
 		if e.useSeqs {
 			CMPQ(mo, c.windowSize)
+			JG(LabelRef("error_match_off_too_big"))
 		} else {
 			CMPQ(mo, c.windowSizePtr)
+			JG(LabelRef("error_match_off_too_big_save"))
 		}
-		JG(LabelRef("error_match_off_too_big"))
-	}
-
-	Comment("Copy match from history")
-	{
-		v := GP64()
-		MOVQ(mo, v)
-
-		// v := seq.mo - outPosition
-		SUBQ(c.outPosition, v)
-		JLS(LabelRef("copy_match")) // do nothing if v <= 0
-
-		// v := seq.mo - t; v > 0 {
-		//     start := len(hist) - v
-		//     ...
-		// }
-		assert(func(ok LabelRef) {
-			if e.useSeqs {
-				TESTQ(c.histLen, c.histLen)
-			} else {
-				t := GP64()
-				MOVQ(c.histLenPtr, t)
-				TESTQ(t, t)
-			}
-			JNZ(ok)
-		})
-		ptr := GP64()
-		if e.useSeqs {
-			MOVQ(c.histBase, ptr)
-		} else {
-			MOVQ(c.histBasePtr, ptr)
-		}
-		SUBQ(v, ptr) // ptr := &hist[len(hist) - v]
-		CMPQ(ml, v)
-		JG(LabelRef("copy_all_from_history"))
-		/*  if ml <= v {
-		        copy(out[outPosition:], hist[start:start+seq.ml])
-		        t += seq.ml
-		        continue
-		    }
-		*/
-		// We know ml will be at least 3, since we didn't copy anything yet.
-		e.copyMemoryPrecise("4", ptr, c.outBase, ml, 3)
-		ADDQ(ml, c.outPosition)
-		// Note: for the current go tests this branch is taken in 99.53% cases,
-		//       this is why we repeat a little code here.
-		handleLoop()
-		JMP(LabelRef("loop_finished"))
-
-		Label("copy_all_from_history")
-		/*  if seq.ml > v {
-		        // Some goes into current block.
-		        // Copy remainder of history
-		        copy(out[outPosition:], hist[start:])
-		        outPosition += v
-		        seq.ml -= v
-		    }
-		*/
-		e.copyMemoryPrecise("5", ptr, c.outBase, v, 1)
-		ADDQ(v, c.outPosition)
-		SUBQ(v, ml)
-		// ml cannot be 0, since we only jump here is ml > v.
-		// Copy rest from current block.
+		// When mo <= outPosition (common case: 100% of DecodeAll, >95% streaming),
+		// mo <= outPosition + histLen holds automatically and the match lies inside
+		// the current buffer, so fall straight through to copy_match.
+		CMPQ(mo, c.outPosition)
+		JA(LabelRef("copy_from_history"))
 	}
 
 	Comment("Copy match from the current buffer")
@@ -1430,16 +1533,6 @@ func (e executeSimple) executeSingleTriple(c *executeSingleTripleContext, handle
 		MOVQ(c.outBase, src)
 		SUBQ(mo, src) // src = &s.out[t - mo]
 
-		// start := t - mo
-		// if ml <= t-start {
-		//     // no overlap
-		// } else {
-		//     // overlapping copy
-		// }
-		//
-		// Note: ml <= t - start
-		//       ml <= t - (t - mo)
-		//       ml <= mo
 		Comment("ml <= mo")
 		CMPQ(ml, mo)
 		JA(LabelRef("copy_overlapping_match"))
@@ -1449,19 +1542,8 @@ func (e executeSimple) executeSingleTriple(c *executeSingleTripleContext, handle
 			ADDQ(ml, c.outPosition)
 			if e.safeMem {
 				e.copyMemoryPrecise("2", src, c.outBase, ml, 1)
+				JMP(LabelRef("handle_loop"))
 			} else {
-				// The match length decides how many blocks to copy, and on
-				// data compressed at SpeedBetterCompression 35-80% of matches
-				// are longer than 16 bytes, so a short first block leaves a
-				// poorly predicted exit branch on most sequences. Copy
-				// matchFirstBlock bytes straight-line, then loop in 32-byte
-				// steps; fewer distinct trip counts mean fewer mispredicts.
-				//
-				// All loads are issued before any store, so the copy is
-				// correct for every ml <= mo even when the block reaches
-				// into bytes this copy writes: everything past ml is
-				// garbage that later output overwrites. The overrun is
-				// covered by compressedBlockOverAlloc.
 				var ts []reg.VecVirtual
 				for i := 0; i < matchFirstBlock/16; i++ {
 					t := XMM()
@@ -1474,17 +1556,32 @@ func (e executeSimple) executeSingleTriple(c *executeSingleTripleContext, handle
 				CMPQ(ml, U8(matchFirstBlock))
 				JA(LabelRef("copy_2_long"))
 				ADDQ(ml, c.outBase)
-				JMP(LabelRef("handle_loop"))
-
-				Label("copy_2_long")
-				dst := GP64()
-				LEAQ(Mem{Base: c.outBase, Disp: matchFirstBlock}, dst)
-				ADDQ(ml, c.outBase)
-				ADDQ(U8(matchFirstBlock), src)
-				SUBQ(U8(matchFirstBlock), ml)
-				e.copyMemory32("2", src, dst, ml)
+				handleLoop()
+				JMP(LabelRef("loop_finished"))
 			}
+		}
 
+		// --- Cold out-of-line copy paths ---
+		if !e.safeMem {
+			Label("copy_1_long")
+			ofs := GP64()
+			t1 := XMM()
+			MOVQ(U32(16), ofs)
+			Label("copy_1_loop")
+			MOVUPS(Mem{Base: c.literals, Index: ofs, Scale: 1}, t1)
+			MOVUPS(t1, Mem{Base: c.outBase, Index: ofs, Scale: 1})
+			ADDQ(U8(16), ofs)
+			CMPQ(ofs, ll)
+			JB(LabelRef("copy_1_loop"))
+			JMP(LabelRef("copy_1_done"))
+
+			Label("copy_2_long")
+			dst := GP64()
+			LEAQ(Mem{Base: c.outBase, Disp: matchFirstBlock}, dst)
+			ADDQ(ml, c.outBase)
+			ADDQ(U8(matchFirstBlock), src)
+			SUBQ(U8(matchFirstBlock), ml)
+			e.copyMemory32("2", src, dst, ml)
 			JMP(LabelRef("handle_loop"))
 		}
 
@@ -1492,13 +1589,8 @@ func (e executeSimple) executeSingleTriple(c *executeSingleTripleContext, handle
 		Label("copy_overlapping_match")
 		{
 			ADDQ(ml, c.outPosition)
-			// With an offset of at least 16, each 16-byte block reads only
-			// bytes written before it, so it can be copied in blocks like a
-			// non-overlapping match. Repeated content (logs, duplicated
-			// documents) is mostly long overlapping matches at such offsets;
-			// shorter offsets are rare and are copied byte by byte.
 			CMPQ(mo, U8(16))
-			JB(LabelRef("copy_slow_3"))
+			JB(LabelRef("copy_overlap_lt16"))
 			if !e.safeMem {
 				dst := GP64()
 				MOVQ(c.outBase, dst)
@@ -1506,7 +1598,6 @@ func (e executeSimple) executeSingleTriple(c *executeSingleTripleContext, handle
 				e.copyMemory("3", src, dst, ml)
 				JMP(LabelRef("handle_loop"))
 			} else {
-				// ml > mo >= 16, so there is at least one whole block.
 				t := XMM()
 				Label("copy_3_blocks")
 				MOVUPS(Mem{Base: src}, t)
@@ -1518,9 +1609,102 @@ func (e executeSimple) executeSingleTriple(c *executeSingleTripleContext, handle
 				JAE(LabelRef("copy_3_blocks"))
 				TESTQ(ml, ml)
 				JZ(LabelRef("handle_loop"))
+				JMP(LabelRef("copy_slow_3"))
+			}
+
+			Label("copy_overlap_lt16")
+			if !e.safeMem {
+				CMPQ(mo, U8(8))
+				JB(LabelRef("copy_overlap_lt8"))
+				dst8 := GP64()
+				tmp8 := GP64()
+				MOVQ(c.outBase, dst8)
+				ADDQ(ml, c.outBase)
+				Label("copy_3_8")
+				MOVQ(Mem{Base: src}, tmp8)
+				MOVQ(tmp8, Mem{Base: dst8})
+				ADDQ(U8(8), src)
+				ADDQ(U8(8), dst8)
+				SUBQ(U8(8), ml)
+				JHI(LabelRef("copy_3_8"))
+				JMP(LabelRef("handle_loop"))
+
+				Label("copy_overlap_lt8")
+				CMPQ(mo, U8(1))
+				JNE(LabelRef("copy_slow_3"))
+				dst1 := GP64()
+				pat := GP64()
+				t2 := GP64()
+				MOVQ(c.outBase, dst1)
+				ADDQ(ml, c.outBase)
+				MOVBQZX(Mem{Base: src}, pat)
+				MOVQ(pat, t2)
+				SHLQ(U8(8), t2)
+				ORQ(t2, pat)
+				MOVQ(pat, t2)
+				SHLQ(U8(16), t2)
+				ORQ(t2, pat)
+				MOVQ(pat, t2)
+				SHLQ(U8(32), t2)
+				ORQ(t2, pat)
+				Label("copy_3_1")
+				MOVQ(pat, Mem{Base: dst1})
+				ADDQ(U8(8), dst1)
+				SUBQ(U8(8), ml)
+				JHI(LabelRef("copy_3_1"))
+				JMP(LabelRef("handle_loop"))
 			}
 			e.copyOverlappedMemory("3", src, c.outBase, ml)
+			JMP(LabelRef("handle_loop"))
 		}
+
+		Comment("Copy match from history (out-of-line)")
+		Label("copy_from_history")
+		{
+			tmp := GP64()
+			if e.useSeqs {
+				LEAQ(Mem{Base: c.outPosition, Index: c.histLen, Scale: 1}, tmp)
+			} else {
+				MOVQ(c.outPosition, tmp)
+				ADDQ(c.histLenPtr, tmp)
+			}
+			CMPQ(mo, tmp)
+			if !e.useSeqs {
+				JG(LabelRef("error_match_off_too_big_save"))
+			} else {
+				JG(LabelRef("error_match_off_too_big"))
+			}
+
+			v := GP64()
+			MOVQ(mo, v)
+			SUBQ(c.outPosition, v) // v > 0 guaranteed since mo > outPosition
+
+			ptr := GP64()
+			if e.useSeqs {
+				MOVQ(c.histBase, ptr)
+			} else {
+				MOVQ(c.histBasePtr, ptr)
+			}
+			SUBQ(v, ptr) // ptr := &hist[len(hist) - v]
+			CMPQ(ml, v)
+			JG(LabelRef("copy_all_from_history"))
+			e.copyMemoryPrecise("4", ptr, c.outBase, ml, 3)
+			ADDQ(ml, c.outPosition)
+			handleLoop()
+			JMP(LabelRef("loop_finished"))
+
+			Label("copy_all_from_history")
+			e.copyMemoryPrecise("5", ptr, c.outBase, v, 1)
+			ADDQ(v, c.outPosition)
+			SUBQ(v, ml)
+			JMP(LabelRef("copy_match"))
+		}
+	}
+	if !e.useSeqs {
+		Label("error_match_off_too_big_save")
+		ctx := Dereference(Param("ctx"))
+		Store(mo, ctx.Field("mo"))
+		JMP(LabelRef("error_match_off_too_big"))
 	}
 }
 

@@ -45,15 +45,31 @@ func decodeAsm(s *sequenceDecs, br *bitReader, ctx *decodeAsmContext, lte56bits 
 //go:noescape
 func sequenceDecs_decodeSync_arm64(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
 
+// sequenceDecs_decodeSync_56_arm64 implements the single-fill decodeSync loop in arm64 asm.
+//
+//go:noescape
+func sequenceDecs_decodeSync_56_arm64(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
+
 // sequenceDecs_decodeSync_safe_arm64 does the same as above, but does not write more than output buffer.
 //
 //go:noescape
 func sequenceDecs_decodeSync_safe_arm64(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
 
-// decodeSyncAsm runs the decodeSync loop, choosing the safe variant.
-func decodeSyncAsm(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext, safe bool) int {
+// sequenceDecs_decodeSync_safe_56_arm64 implements the single-fill safe decodeSync loop in arm64 asm.
+//
+//go:noescape
+func sequenceDecs_decodeSync_safe_56_arm64(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
+
+// decodeSyncAsm runs the decodeSync loop, choosing the safe / 56-bit variant.
+func decodeSyncAsm(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext, safe, lte56bits bool) int {
 	if safe {
+		if lte56bits {
+			return sequenceDecs_decodeSync_safe_56_arm64(s, br, ctx)
+		}
 		return sequenceDecs_decodeSync_safe_arm64(s, br, ctx)
+	}
+	if lte56bits {
+		return sequenceDecs_decodeSync_56_arm64(s, br, ctx)
 	}
 	return sequenceDecs_decodeSync_arm64(s, br, ctx)
 }

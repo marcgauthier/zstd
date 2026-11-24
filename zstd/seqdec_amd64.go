@@ -63,31 +63,63 @@ func decodeAsm(s *sequenceDecs, br *bitReader, ctx *decodeAsmContext, lte56bits 
 //go:noescape
 func sequenceDecs_decodeSync_amd64(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
 
+// sequenceDecs_decodeSync_56_amd64 implements the single-fill decodeSync loop in x86 asm.
+//
+//go:noescape
+func sequenceDecs_decodeSync_56_amd64(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
+
 // sequenceDecs_decodeSync_bmi2 implements the main loop of sequenceDecs.decodeSync in x86 asm with BMI2 extensions.
 //
 //go:noescape
 func sequenceDecs_decodeSync_bmi2(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
+
+// sequenceDecs_decodeSync_56_bmi2 implements the single-fill decodeSync loop in x86 asm with BMI2 extensions.
+//
+//go:noescape
+func sequenceDecs_decodeSync_56_bmi2(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
 
 // sequenceDecs_decodeSync_safe_amd64 does the same as above, but does not write more than output buffer.
 //
 //go:noescape
 func sequenceDecs_decodeSync_safe_amd64(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
 
+// sequenceDecs_decodeSync_safe_56_amd64 implements the single-fill safe decodeSync loop in x86 asm.
+//
+//go:noescape
+func sequenceDecs_decodeSync_safe_56_amd64(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
+
 // sequenceDecs_decodeSync_safe_bmi2 does the same as above, but does not write more than output buffer.
 //
 //go:noescape
 func sequenceDecs_decodeSync_safe_bmi2(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
 
-// decodeSyncAsm runs the decodeSync loop, choosing the BMI2 / safe variant.
-func decodeSyncAsm(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext, safe bool) int {
+// sequenceDecs_decodeSync_safe_56_bmi2 implements the single-fill safe decodeSync loop in x86 asm with BMI2 extensions.
+//
+//go:noescape
+func sequenceDecs_decodeSync_safe_56_bmi2(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext) int
+
+// decodeSyncAsm runs the decodeSync loop, choosing the BMI2 / safe / 56-bit variant.
+func decodeSyncAsm(s *sequenceDecs, br *bitReader, ctx *decodeSyncAsmContext, safe, lte56bits bool) int {
 	if cpuinfo.HasBMI2() {
 		if safe {
+			if lte56bits {
+				return sequenceDecs_decodeSync_safe_56_bmi2(s, br, ctx)
+			}
 			return sequenceDecs_decodeSync_safe_bmi2(s, br, ctx)
+		}
+		if lte56bits {
+			return sequenceDecs_decodeSync_56_bmi2(s, br, ctx)
 		}
 		return sequenceDecs_decodeSync_bmi2(s, br, ctx)
 	}
 	if safe {
+		if lte56bits {
+			return sequenceDecs_decodeSync_safe_56_amd64(s, br, ctx)
+		}
 		return sequenceDecs_decodeSync_safe_amd64(s, br, ctx)
+	}
+	if lte56bits {
+		return sequenceDecs_decodeSync_56_amd64(s, br, ctx)
 	}
 	return sequenceDecs_decodeSync_amd64(s, br, ctx)
 }

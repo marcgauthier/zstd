@@ -57,32 +57,56 @@ init_main_loop_condition:
 	SUB  $1, R0, R10
 	MOVD $0, R11
 	MOVD $0, R12
-	JMP  spread_main_loop_condition
+	CMP  R10, R8
+	BNE  spread_slow_loop_condition
+	JMP  spread_fast_loop_condition
 
-spread_main_loop:
-	MOVD $0, R13
-	MOVH (R1)(R12<<1), R14
-	JMP  spread_inner_loop_condition
+spread_fast_loop:
+	MOVH (R1)(R12<<1), R8
+	TST  R8, R8
+	BLE  spread_fast_next
 
-spread_inner_loop:
+spread_fast_inner:
+	ADD  R11<<3, R5, R15
+	MOVB R12, 1(R15)
+	ADD  R9, R11, R11
+	AND  R10, R11, R11
+	SUBS $1, R8, R8
+	BNE  spread_fast_inner
+
+spread_fast_next:
+	ADD $1, R12, R12
+
+spread_fast_loop_condition:
+	CMP R7, R12
+	BLT spread_fast_loop
+	JMP spread_done
+
+spread_slow_loop:
+	MOVH (R1)(R12<<1), R13
+	TST  R13, R13
+	BLE  spread_slow_next
+
+spread_slow_inner:
 	ADD  R11<<3, R5, R15
 	MOVB R12, 1(R15)
 
 adjust_position:
-	ADD R9, R11, R11
-	AND R10, R11, R11
-	CMP R8, R11
-	BGT adjust_position
-	ADD $1, R13, R13
+	ADD  R9, R11, R11
+	AND  R10, R11, R11
+	CMP  R8, R11
+	BGT  adjust_position
+	SUBS $1, R13, R13
+	BNE  spread_slow_inner
 
-spread_inner_loop_condition:
-	CMP R14, R13
-	BLT spread_inner_loop
+spread_slow_next:
 	ADD $1, R12, R12
 
-spread_main_loop_condition:
-	CMP  R7, R12
-	BLT  spread_main_loop
+spread_slow_loop_condition:
+	CMP R7, R12
+	BLT spread_slow_loop
+
+spread_done:
 	TST  R11, R11
 	BEQ  spread_check_ok
 	MOVD ctx+8(FP), R0
@@ -109,29 +133,27 @@ build_table_main_table:
 	SUB   R10, R1, R1
 	LSL   R1, R9, R9
 	SUB   R0, R9, R9
-	MOVD  (R6)(R8<<3), R8
-	ORR   R1, R8, R8
-	MOVD  R9, R10
-	AND   $0x0000ffff, R10, R10
-	LSL   $0x10, R10, R10
-	ORR   R10, R8, R8
-	MOVD  R8, (R5)(R7<<3)
 	CMP   R0, R9
-	BLE   build_table_check1_ok
-	MOVD  ctx+8(FP), R1
-	MOVD  R9, 32(R1)
-	MOVD  R0, 40(R1)
-	MOVD  $+2, R16
-	MOVD  R16, ret+16(FP)
-	RET
+	BHI   build_table_err_newstate
+	TST   $0xff, R1
+	BEQ   build_table_check_nobits
 
-build_table_check1_ok:
-	TST  $0xff, R1
-	BNE  build_table_check2_ok
+build_table_store:
+	MOVD (R6)(R8<<3), R8
+	ORR  R1, R8, R8
+	LSL  $0x10, R9, R9
+	ORR  R9, R8, R8
+	MOVD R8, (R5)(R7<<3)
+	ADD  $1, R7, R7
+	CMP  R0, R7
+	BLT  build_table_main_table
+	JMP  build_table_done
+
+build_table_check_nobits:
 	AND  $0xffff, R7, R16
 	AND  $0xffff, R9, R15
 	CMP  R16, R15
-	BNE  build_table_check2_ok
+	BNE  build_table_store
 	MOVD ctx+8(FP), R0
 	MOVD R9, 32(R0)
 	MOVD R7, 40(R0)
@@ -139,10 +161,15 @@ build_table_check1_ok:
 	MOVD R16, ret+16(FP)
 	RET
 
-build_table_check2_ok:
-	ADD  $1, R7, R7
-	CMP  R0, R7
-	BLT  build_table_main_table
+build_table_err_newstate:
+	MOVD ctx+8(FP), R1
+	MOVD R9, 32(R1)
+	MOVD R0, 40(R1)
+	MOVD $+2, R16
+	MOVD R16, ret+16(FP)
+	RET
+
+build_table_done:
 	MOVD $+0, R16
 	MOVD R16, ret+16(FP)
 	RET

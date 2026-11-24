@@ -180,15 +180,39 @@ func (b *buildDtable) spread(norm, symbolLen reg.GPVirtual) {
 
 	// ss := 0
 	ss := New64()
-	JMP(LabelRef("spread_main_loop_condition"))
-	Label("spread_main_loop")
+	// Fast path when there are no lowprob (-1) symbols: highThreshold == tableMask,
+	// so position never exceeds highThreshold and the inner check disappears.
+	CMPQ(b.highThreshold, tableMask)
+	JNE(LabelRef("spread_slow_loop_condition"))
+
+	JMP(LabelRef("spread_fast_loop_condition"))
+	Label("spread_fast_loop")
 	{
-		i := New64()
 		v := GP64()
 		MOVWQSX(Mem{Base: norm, Index: ss, Scale: 2}, v)
-		JMP(LabelRef("spread_inner_loop_condition"))
-		Label("spread_inner_loop")
+		TESTQ(v, v)
+		JLE(LabelRef("spread_fast_next"))
+		Label("spread_fast_inner")
+		MOVB(ss.As8(), Mem{Base: b.dt, Index: position, Scale: 8, Disp: 1})
+		ADDQ(step, position)
+		ANDQ(tableMask, position)
+		DECQ(v)
+		JNZ(LabelRef("spread_fast_inner"))
+	}
+	Label("spread_fast_next")
+	INCQ(ss)
+	Label("spread_fast_loop_condition")
+	CMPQ(ss, symbolLen)
+	JL(LabelRef("spread_fast_loop"))
+	JMP(LabelRef("spread_done"))
 
+	Label("spread_slow_loop")
+	{
+		v := GP64()
+		MOVWQSX(Mem{Base: norm, Index: ss, Scale: 2}, v)
+		TESTQ(v, v)
+		JLE(LabelRef("spread_slow_next"))
+		Label("spread_slow_inner")
 		{
 			// s.dt[position].setAddBits(uint8(ss))
 			MOVB(ss.As8(), Mem{Base: b.dt, Index: position, Scale: 8, Disp: 1})
@@ -205,17 +229,16 @@ func (b *buildDtable) spread(norm, symbolLen reg.GPVirtual) {
 			CMPQ(position, b.highThreshold)
 			JG(LabelRef("adjust_position"))
 		}
-		INCQ(i)
-		Label("spread_inner_loop_condition")
-		CMPQ(i, v)
-		JL(LabelRef("spread_inner_loop"))
+		DECQ(v)
+		JNZ(LabelRef("spread_slow_inner"))
 	}
-
+	Label("spread_slow_next")
 	INCQ(ss)
-	Label("spread_main_loop_condition")
+	Label("spread_slow_loop_condition")
 	CMPQ(ss, symbolLen)
-	JL(LabelRef("spread_main_loop"))
+	JL(LabelRef("spread_slow_loop"))
 
+	Label("spread_done")
 	/*
 		if position != 0 {
 			// position must reach all cells once, otherwise normalizedCounter is incorrect
@@ -232,24 +255,6 @@ func (b *buildDtable) spread(norm, symbolLen reg.GPVirtual) {
 
 func (b *buildDtable) buildTable() {
 	Comment("Build Decoding table")
-	/*
-		tableSize := uint16(1 << s.actualTableLog)
-		for u, v := range s.dt[:tableSize] {
-			symbol := v.addBits()
-			nextState := symbolNext[symbol]
-			symbolNext[symbol] = nextState + 1
-			nBits := s.actualTableLog - byte(highBits(uint32(nextState)))
-			newState := (nextState << nBits) - tableSize
-			if newState > tableSize {
-				return fmt.Errorf("newState (%d) outside table size (%d)", newState, tableSize)
-			}
-			if newState == uint16(u) && nBits == 0 {
-				// Seems weird that this is possible with nbits > 0.
-				return fmt.Errorf("newState (%d) == oldState (%d) and no bits", newState, u)
-			}
-			s.dt[u&maxTableMask] = ext[symbol] | decSymbol(nBits) | decSymbol(newState)<<16
-		}
-	*/
 	u := New64()
 	Label("build_table_main_table")
 	{
@@ -285,49 +290,40 @@ func (b *buildDtable) buildTable() {
 		SHLQ(reg.CL, newState)
 		SUBQ(b.tableSize, newState)
 
+		// if newState > tableSize (unsigned check also catches < 0)
+		CMPQ(newState, b.tableSize)
+		JA(LabelRef("build_table_err_newstate"))
+
+		// if newState == uint16(u) && nBits == 0
+		TESTB(nBits.As8(), nBits.As8())
+		JZ(LabelRef("build_table_check_nobits"))
+
+		Label("build_table_store")
 		// s.dt[u&maxTableMask] = ext[symbol] | decSymbol(nBits) | decSymbol(newState)<<16
-		// One 8-byte store: ext[symbol] carries addBits and baseline, which
-		// the spread left as the symbol in byte #1; nBits is byte #0 and
-		// newState word #1 (bytes #2 & #3).
+		// newState <= tableSize <= 512 so it fits cleanly in 16 bits without masking.
 		{
 			entry := GP64()
 			MOVQ(Mem{Base: b.ext, Index: symbol, Scale: 8}, entry)
 			ORQ(nBits, entry)
-			state := Copy64(newState)
-			ANDQ(U32(0xffff), state)
-			SHLQ(U8(16), state)
-			ORQ(state, entry)
+			SHLQ(U8(16), newState)
+			ORQ(newState, entry)
 			MOVQ(entry, Mem{Base: b.dt, Index: u, Scale: 8})
 		}
 
-		// if newState > tableSize {
-		// 	return fmt.Errorf("newState (%d) outside table size (%d)", newState, tableSize)
-		// }
-		{
-			CMPQ(newState, b.tableSize)
-			JLE(LabelRef("build_table_check1_ok"))
+		INCQ(u)
+		CMPQ(u, b.tableSize)
+		JL(LabelRef("build_table_main_table"))
+		JMP(LabelRef("build_table_done"))
 
-			b.returnError(errorNewStateTooBig, newState, b.tableSize)
-			Label("build_table_check1_ok")
-		}
+		Label("build_table_check_nobits")
+		CMPW(newState.As16(), u.As16())
+		JNE(LabelRef("build_table_store"))
+		b.returnError(errorNewStateNoBits, newState, u)
 
-		// if newState == uint16(u) && nBits == 0 {
-		// 	// Seems weird that this is possible with nbits > 0.
-		// 	return fmt.Errorf("newState (%d) == oldState (%d) and no bits", newState, u)
-		// }
-		{
-			TESTB(nBits.As8(), nBits.As8())
-			JNZ(LabelRef("build_table_check2_ok"))
-			CMPW(newState.As16(), u.As16())
-			JNE(LabelRef("build_table_check2_ok"))
-
-			b.returnError(errorNewStateNoBits, newState, u)
-			Label("build_table_check2_ok")
-		}
+		Label("build_table_err_newstate")
+		b.returnError(errorNewStateTooBig, newState, b.tableSize)
 	}
-	INCQ(u)
-	CMPQ(u, b.tableSize)
-	JL(LabelRef("build_table_main_table"))
+	Label("build_table_done")
 }
 
 // returnCode sets function result and terminates the function.

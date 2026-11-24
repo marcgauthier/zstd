@@ -7,8 +7,10 @@ package zstd
 import (
 	"bytes"
 	"fmt"
+	"math/bits"
 
 	"github.com/klauspost/compress"
+	"github.com/klauspost/compress/internal/le"
 )
 
 const (
@@ -38,23 +40,19 @@ const highScore = maxMatchLen * 8
 
 // estBits will estimate output bits from predefined tables.
 func (m *match) estBits(bitsPerByte int32) {
-	mlc := mlCode(uint32(m.length - zstdMinMatch))
-	var ofc uint8
-	if m.rep < 0 {
-		ofc = ofCode(uint32(m.s-m.offset) + 3)
+	mlBase := uint32(m.length - zstdMinMatch)
+	var mlCost int32
+	if mlBase <= 127 {
+		mlCost = predefMLDirect[mlBase]
 	} else {
-		ofc = ofCode(uint32(m.rep) & 3)
+		mlCost = predefMLCost[bits.Len32(mlBase)+35]
 	}
-	// Cost, excluding
-	ofTT, mlTT := fsePredefEnc[tableOffsets].ct.symbolTT[ofc], fsePredefEnc[tableMatchLengths].ct.symbolTT[mlc]
-
-	// Add cost of match encoding...
-	m.est = int32(ofTT.outBits + mlTT.outBits)
-	m.est += int32(ofTT.deltaNbBits>>16 + mlTT.deltaNbBits>>16)
-	// Subtract savings compared to literal encoding...
-	m.est -= (m.length * bitsPerByte) >> 10
+	off := uint32(m.rep) & 3
+	if m.rep < 0 {
+		off = uint32(m.s-m.offset) + 3
+	}
+	m.est = predefOFCost[bits.Len32(off)-1] + mlCost - (m.length*bitsPerByte)>>10
 	if m.est > 0 {
-		// Unlikely gain..
 		m.length = 0
 		m.est = highScore
 	}
@@ -166,6 +164,10 @@ func (e *bestFastEncoder) Encode(blk *blockEnc, src []byte) {
 	// Override src
 	src = e.hist
 	sLimit := int32(len(src)) - inputMargin
+	if useMatchAsm && s < sLimit {
+		bestFastEncodeAsm(e, blk, src, s, sLimit, bitsPerByte, true)
+		return
+	}
 	const kSearchStrength = 10
 
 	// nextEmit is where in src the next emitLiteral should start from.
@@ -206,57 +208,11 @@ encodeLoop:
 		candidateL := e.longTable[nextHashL]
 		candidateS := e.table[nextHashS]
 
-		// improveSlow evaluates a candidate that passed improve's checks.
-		improveSlow := func(m *match, offset int32, s int32, first uint32, rep int32) {
-			// Try to quick reject if we already have a long match.
-			if m.length > 16 {
-				left := len(src) - int(m.s+m.length)
-				// If we are too close to the end, keep as is.
-				if left <= 0 {
-					return
-				}
-				checkLen := m.length - (s - m.s) - 8
-				if left > 2 && checkLen > 4 {
-					// Check 4 bytes, 4 bytes from the end of the current match.
-					a := load3232(src, offset+checkLen)
-					b := load3232(src, s+checkLen)
-					if a != b {
-						return
-					}
-				}
-			}
-			l := 4 + e.matchlen(s+4, offset+4, src)
-			if m.rep <= 0 {
-				// Extend candidate match backwards as far as possible.
-				// Do not extend repeats as we can assume they are optimal
-				// and offsets change if s == nextEmit.
-				tMin := max(s-e.maxMatchOff, 0)
-				for offset > tMin && s > nextEmit && src[offset-1] == src[s-1] && l < maxMatchLength {
-					s--
-					offset--
-					l++
-				}
-			}
-			if debugAsserts {
-				if offset >= s {
-					panic(fmt.Sprintf("offset: %d - s:%d - rep: %d - cur :%d - max: %d", offset, s, rep, e.cur, e.maxMatchOff))
-				}
-				if !bytes.Equal(src[s:s+l], src[offset:offset+l]) {
-					panic(fmt.Sprintf("second match mismatch: %v != %v, first: %08x", src[s:s+4], src[offset:offset+4], first))
-				}
-			}
-			cand := match{offset: offset, s: s, length: l, rep: rep}
-			cand.estBits(bitsPerByte)
-			if m.est >= highScore || cand.est-m.est+(cand.s-m.s)*bitsPerByte>>10 < 0 {
-				*m = cand
-			}
-		}
-
 		// Set m to a match at offset if it looks like that will improve compression.
 		// The reject path is kept small so it inlines at every call site.
 		improve := func(m *match, offset int32, s int32, first uint32, rep int32) {
 			if delta := s - offset; delta < e.maxMatchOff && delta > 0 && load3232(src, offset) == first {
-				improveSlow(m, offset, s, first, rep)
+				e.improveSlow(m, offset, s, nextEmit, bitsPerByte, src, first, rep)
 			}
 		}
 
@@ -470,12 +426,141 @@ encodeLoop:
 	}
 }
 
+// improveSlow evaluates a candidate match that passed improve's initial checks.
+func (e *bestFastEncoder) improveSlow(m *match, offset, s, nextEmit, bitsPerByte int32, src []byte, first uint32, rep int32) {
+	// Try to quick reject if we already have a long match.
+	if m.length > 16 {
+		left := len(src) - int(m.s+m.length)
+		// If we are too close to the end, keep as is.
+		if left <= 0 {
+			return
+		}
+		checkLen := m.length - (s - m.s) - 8
+		if left > 2 && checkLen > 4 {
+			// Check 4 bytes, 4 bytes from the end of the current match.
+			if load3232(src, offset+checkLen) != load3232(src, s+checkLen) {
+				return
+			}
+		}
+	}
+	var l int32
+	if int(s+12) <= len(src) {
+		if diff := le.Load64(src, s+4) ^ le.Load64(src, offset+4); diff != 0 {
+			l = 4 + int32(bits.TrailingZeros64(diff)>>3)
+		} else {
+			l = 12 + e.matchlen(s+12, offset+12, src)
+		}
+	} else {
+		l = 4 + e.matchlen(s+4, offset+4, src)
+	}
+	if m.rep <= 0 {
+		// Extend candidate match backwards as far as possible.
+		// Do not extend repeats as we can assume they are optimal
+		// and offsets change if s == nextEmit.
+		tMin := max(s-e.maxMatchOff, 0)
+		for offset > tMin && s > nextEmit && src[offset-1] == src[s-1] && l < maxMatchLength {
+			s--
+			offset--
+			l++
+		}
+	}
+	if debugAsserts {
+		if offset >= s {
+			panic(fmt.Sprintf("offset: %d - s:%d - rep: %d - cur :%d - max: %d", offset, s, rep, e.cur, e.maxMatchOff))
+		}
+		if !bytes.Equal(src[s:s+l], src[offset:offset+l]) {
+			panic(fmt.Sprintf("second match mismatch: %v != %v, first: %08x", src[s:s+4], src[offset:offset+4], first))
+		}
+	}
+	cand := match{offset: offset, s: s, length: l, rep: rep}
+	cand.estBits(bitsPerByte)
+	if m.est >= highScore || cand.est-m.est+(cand.s-m.s)*bitsPerByte>>10 < 0 {
+		*m = cand
+	}
+}
+
 // EncodeNoHist will encode a block with no history and no following blocks.
 // Most notable difference is that src will not be copied for history and
 // we do not need to check for max match length.
 func (e *bestFastEncoder) EncodeNoHist(blk *blockEnc, src []byte) {
+	if useMatchAsm {
+		const (
+			inputMargin            = 8 + 4
+			minNonLiteralBlockSize = 16
+		)
+		if e.cur >= e.bufferReset-int32(len(src)) {
+			e.table = [bestShortTableSize]prevEntry{}
+			e.longTable = [bestLongTableSize]prevEntry{}
+			e.cur = e.maxMatchOff
+		}
+		blk.size = len(src)
+		blk.highRatio = true
+		if len(src) > zstdMinMatch {
+			if matchLen(src[1:], src) == len(src)-1 {
+				blk.literals = append(blk.literals, src[0])
+				blk.sequences = append(blk.sequences, seq{litLen: 1, matchLen: uint32(len(src)-1) - zstdMinMatch, offset: 1 + 3})
+				return
+			}
+		}
+		if len(src) < minNonLiteralBlockSize {
+			blk.extraLits = len(src)
+			blk.literals = blk.literals[:len(src)]
+			copy(blk.literals, src)
+			return
+		}
+		bitsPerByte := max(int32((compress.ShannonEntropyBits(src)*1024)/len(src)), 1024)
+		sLimit := int32(len(src)) - inputMargin
+		bestFastEncodeAsm(e, blk, src, 0, sLimit, bitsPerByte, false)
+		e.cur += int32(len(src))
+		return
+	}
 	e.ensureHist(len(src))
 	e.Encode(blk, src)
+}
+
+func (e *bestFastEncoder) PrepareSlice(totalLen int) {
+	if e.cur >= e.bufferReset-int32(totalLen) {
+		e.table = [bestShortTableSize]prevEntry{}
+		e.longTable = [bestLongTableSize]prevEntry{}
+		e.cur = e.maxMatchOff
+	}
+}
+
+func (e *bestFastEncoder) EncodeSlice(blk *blockEnc, full []byte, start, end int) {
+	const (
+		inputMargin            = 8 + 4
+		minNonLiteralBlockSize = 16
+	)
+	block := full[start:end]
+	blk.size = len(block)
+	blk.highRatio = true
+	if len(block) > zstdMinMatch {
+		if matchLen(block[1:], block) == len(block)-1 {
+			blk.literals = append(blk.literals, block[0])
+			blk.sequences = append(blk.sequences, seq{litLen: 1, matchLen: uint32(len(block)-1) - zstdMinMatch, offset: 1 + 3})
+			return
+		}
+	}
+	if len(block) < minNonLiteralBlockSize {
+		blk.extraLits = len(block)
+		blk.literals = blk.literals[:len(block)]
+		copy(blk.literals, block)
+		return
+	}
+	bitsPerByte := max(int32((compress.ShannonEntropyBits(block)*1024)/len(block)), 1024)
+	src := full[:end]
+	s := int32(start)
+	sLimit := int32(end) - inputMargin
+	if s < sLimit {
+		bestFastEncodeAsm(e, blk, src, s, sLimit, bitsPerByte, true)
+	} else {
+		blk.extraLits = len(block)
+		blk.literals = append(blk.literals, block...)
+	}
+}
+
+func (e *bestFastEncoder) FinishSlice(totalLen int) {
+	e.cur += int32(totalLen)
 }
 
 // Reset will reset and set a dictionary if not nil

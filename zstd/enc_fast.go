@@ -83,6 +83,10 @@ func (e *fastEncoder) Encode(blk *blockEnc, src []byte) {
 	// Override src
 	src = e.hist
 	sLimit := int32(len(src)) - inputMargin
+	if useMatchAsm {
+		fastEncodeAsm(e, blk, src, s, sLimit, true)
+		return
+	}
 	// stepSize is the number of bytes to skip on every main loop iteration.
 	// It should be >= 2.
 	const stepSize = 2
@@ -293,6 +297,43 @@ encodeLoop:
 	}
 }
 
+// PrepareSlice prepares the encoder to encode a contiguous slice directly without copying into e.hist.
+func (e *fastEncoder) PrepareSlice(totalLen int) {
+	if e.cur >= e.bufferReset-int32(totalLen) {
+		e.table = [tableSize]tableEntry{}
+		e.cur = e.maxMatchOff
+	}
+}
+
+// FinishSlice invalidates table entries written during EncodeSlice calls.
+func (e *fastEncoder) FinishSlice(totalLen int) {
+	if e.cur < e.bufferReset {
+		e.cur += int32(totalLen)
+	}
+}
+
+// EncodeSlice encodes fullSrc[start:end] using fullSrc[:end] directly as history.
+func (e *fastEncoder) EncodeSlice(blk *blockEnc, fullSrc []byte, start, end int) {
+	const (
+		inputMargin            = 8
+		minNonLiteralBlockSize = 1 + 1 + inputMargin
+	)
+	blockLen := end - start
+	blk.size = blockLen
+	if blockLen < minNonLiteralBlockSize {
+		blk.extraLits = blockLen
+		blk.literals = blk.literals[:blockLen]
+		copy(blk.literals, fullSrc[start:end])
+		return
+	}
+	if useMatchAsm {
+		fastEncodeAsm(e, blk, fullSrc[:end], int32(start), int32(end)-inputMargin, true)
+		return
+	}
+	// Portable fallback when noasm is enabled.
+	e.Encode(blk, fullSrc[start:end])
+}
+
 // EncodeNoHist will encode a block with no history and no following blocks.
 // Most notable difference is that src will not be copied for history and
 // we do not need to check for max match length.
@@ -325,6 +366,13 @@ func (e *fastEncoder) EncodeNoHist(blk *blockEnc, src []byte) {
 	}
 
 	sLimit := int32(len(src)) - inputMargin
+	if useMatchAsm {
+		fastEncodeAsm(e, blk, src, s, sLimit, false)
+		if e.cur < e.bufferReset {
+			e.cur += int32(len(src))
+		}
+		return
+	}
 	// stepSize is the number of bytes to skip on every main loop iteration.
 	// It should be >= 2.
 	const stepSize = 2

@@ -136,6 +136,10 @@ func (e *betterFastEncoder) Encode(blk *blockEnc, src []byte) {
 	// Override src
 	src = e.hist
 	sLimit := int32(len(src)) - inputMargin
+	if useMatchAsm {
+		betterFastEncodeAsm(e, blk, src, s, sLimit, true)
+		return
+	}
 	primeL, primeS := hashPrimes8and5()
 	// stepSize is the number of bytes to skip on every main loop iteration.
 	// It should be >= 1.
@@ -575,10 +579,85 @@ encodeLoop:
 	}
 }
 
+// PrepareSlice prepares the encoder to encode a contiguous slice directly without copying into e.hist.
+func (e *betterFastEncoder) PrepareSlice(totalLen int) {
+	if e.cur >= e.bufferReset-int32(totalLen) {
+		e.table = [betterShortTableSize]tableEntry{}
+		e.longTable = [betterLongTableSize]prevEntry{}
+		e.cur = e.maxMatchOff
+	}
+}
+
+// FinishSlice invalidates table entries written during EncodeSlice calls.
+func (e *betterFastEncoder) FinishSlice(totalLen int) {
+	if e.cur < e.bufferReset {
+		e.cur += int32(totalLen)
+	}
+}
+
+// EncodeSlice encodes fullSrc[start:end] using fullSrc[:end] directly as history.
+func (e *betterFastEncoder) EncodeSlice(blk *blockEnc, fullSrc []byte, start, end int) {
+	const (
+		inputMargin            = 8 + 2
+		minNonLiteralBlockSize = 16
+	)
+	blockLen := end - start
+	blk.size = blockLen
+	if blockLen > zstdMinMatch {
+		src := fullSrc[start:end]
+		if matchLen(src[1:], src) == blockLen-1 {
+			blk.literals = append(blk.literals, src[0])
+			blk.sequences = append(blk.sequences, seq{litLen: 1, matchLen: uint32(blockLen-1) - zstdMinMatch, offset: 1 + 3})
+			return
+		}
+	}
+	if blockLen < minNonLiteralBlockSize {
+		blk.extraLits = blockLen
+		blk.literals = blk.literals[:blockLen]
+		copy(blk.literals, fullSrc[start:end])
+		return
+	}
+	if useMatchAsm {
+		betterFastEncodeAsm(e, blk, fullSrc[:end], int32(start), int32(end)-inputMargin, true)
+		return
+	}
+	e.Encode(blk, fullSrc[start:end])
+}
+
 // EncodeNoHist will encode a block with no history and no following blocks.
 // Most notable difference is that src will not be copied for history and
 // we do not need to check for max match length.
 func (e *betterFastEncoder) EncodeNoHist(blk *blockEnc, src []byte) {
+	if useMatchAsm {
+		const (
+			inputMargin            = 8 + 2
+			minNonLiteralBlockSize = 16
+		)
+		if e.cur >= e.bufferReset {
+			e.table = [betterShortTableSize]tableEntry{}
+			e.longTable = [betterLongTableSize]prevEntry{}
+			e.cur = e.maxMatchOff
+		}
+		blk.size = len(src)
+		if len(src) > zstdMinMatch {
+			if matchLen(src[1:], src) == len(src)-1 {
+				blk.literals = append(blk.literals, src[0])
+				blk.sequences = append(blk.sequences, seq{litLen: 1, matchLen: uint32(len(src)-1) - zstdMinMatch, offset: 1 + 3})
+				return
+			}
+		}
+		if len(src) < minNonLiteralBlockSize {
+			blk.extraLits = len(src)
+			blk.literals = blk.literals[:len(src)]
+			copy(blk.literals, src)
+			return
+		}
+		betterFastEncodeAsm(e, blk, src, 0, int32(len(src))-inputMargin, false)
+		if e.cur < e.bufferReset {
+			e.cur += int32(len(src))
+		}
+		return
+	}
 	e.ensureHist(len(src))
 	e.Encode(blk, src)
 }

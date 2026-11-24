@@ -68,11 +68,28 @@ type ultraStats struct {
 	// Per symbol parts of the prices. The sums only enter through the bases,
 	// so a stored sequence updates four entries instead of every price.
 	litW                       [256]int32
+	litPriceTbl                [256]int32
 	llCost                     [maxLLCode + 1]int32
 	mlCost                     [maxMLCode + 1]int32
+	mlCostDirect               [128]int32
 	ofCost                     [32]int32
 	litBase, llBase, matchBase int32
 }
+
+var mlCodeDirectRange = func() (r [maxMLCode + 1][2]uint8) {
+	for i := range r {
+		r[i] = [2]uint8{255, 0}
+	}
+	for i, c := range mlCodeTable {
+		if uint8(i) < r[c][0] {
+			r[c][0] = uint8(i)
+		}
+		if uint8(i+1) > r[c][1] {
+			r[c][1] = uint8(i + 1)
+		}
+	}
+	return r
+}()
 
 // ultraEncoder searches a binary tree like the reference btultra2 strategy
 // and chooses sequences with its optimal parser.
@@ -535,14 +552,20 @@ func (e *ultraEncoder) parse(blk *blockEnc, istart, iend int32, rep [3]uint32, s
 				opt[pos].mlen = 0
 				opt[pos].litlen = litlen + pos
 			}
-			base := opt[0].price + st.llPrice(0) + st.matchBase
+			ll0Base := st.llPrice(0) + st.matchBase
+			llInc1 := st.llCost[1] - st.llCost[0]
+			base := opt[0].price + ll0Base
 			for _, m := range matches[:n] {
 				p := base + st.ofCost[ofCode(m.off)]
 				for ; pos <= m.length; pos++ {
 					opt[pos].mlen = pos
 					opt[pos].off = m.off
 					opt[pos].litlen = 0
-					opt[pos].price = p + st.mlCost[mlCode(uint32(pos-zstdMinMatch))]
+					if pos <= 127+zstdMinMatch {
+						opt[pos].price = p + st.mlCostDirect[pos-zstdMinMatch]
+					} else {
+						opt[pos].price = p + st.mlCost[mlCode(uint32(pos-zstdMinMatch))]
+					}
 				}
 			}
 			lastPos = pos - 1
@@ -553,15 +576,15 @@ func (e *ultraEncoder) parse(blk *blockEnc, istart, iend int32, rep [3]uint32, s
 				inr := ip + cur
 				// Reach cur with one more literal, if that is cheaper.
 				ll := opt[cur-1].litlen + 1
-				if price := opt[cur-1].price + st.litPrice(src[inr-1]) + st.llIncPrice(ll); price <= opt[cur].price {
+				if price := opt[cur-1].price + st.litPriceTbl[src[inr-1]] + st.llIncPrice(ll); price <= opt[cur].price {
 					prevMatch := opt[cur]
 					opt[cur] = opt[cur-1]
 					opt[cur].litlen = ll
 					opt[cur].price = price
-					if prevMatch.litlen == 0 && st.llIncPrice(1) < 0 && inr < iend {
+					if prevMatch.litlen == 0 && llInc1 < 0 && inr < iend {
 						// The replaced match followed by one literal may still win at cur+1.
-						lp := st.litPrice(src[inr])
-						with1 := prevMatch.price + lp + st.llIncPrice(1)
+						lp := st.litPriceTbl[src[inr]]
+						with1 := prevMatch.price + lp + llInc1
 						if with1 < price+lp+st.llIncPrice(ll+1) && with1 < opt[cur+1].price {
 							prev := cur - prevMatch.mlen
 							reps := ultraNewRep(opt[prev].rep, prevMatch.off, opt[prev].litlen == 0)
@@ -594,23 +617,39 @@ func (e *ultraEncoder) parse(blk *blockEnc, istart, iend int32, rep [3]uint32, s
 					immediate = true
 					break
 				}
-				base := opt[cur].price + st.llPrice(0) + st.matchBase
+				base := opt[cur].price + ll0Base
+				for lastPos < cur+longest {
+					lastPos++
+					opt[lastPos].price = ultraMaxPrice
+					opt[lastPos].litlen = 1
+				}
 				startML := int32(ultraMinMatch)
 				for _, m := range matches[:n] {
 					p := base + st.ofCost[ofCode(m.off)]
-					for ml := m.length; ml >= startML; ml-- {
-						pos := cur + ml
-						price := p + st.mlCost[mlCode(uint32(ml-zstdMinMatch))]
-						if pos > lastPos || price < opt[pos].price {
-							for lastPos < pos {
-								lastPos++
-								opt[lastPos].price = ultraMaxPrice
-								opt[lastPos].litlen = 1
+					if m.length <= 127+zstdMinMatch {
+						for ml := m.length; ml >= startML; ml-- {
+							price := p + st.mlCostDirect[ml-zstdMinMatch]
+							if o := &opt[cur+ml]; price < o.price {
+								o.mlen = ml
+								o.off = m.off
+								o.litlen = 0
+								o.price = price
 							}
-							opt[pos].mlen = ml
-							opt[pos].off = m.off
-							opt[pos].litlen = 0
-							opt[pos].price = price
+						}
+					} else {
+						for ml := m.length; ml >= startML; ml-- {
+							var price int32
+							if ml <= 127+zstdMinMatch {
+								price = p + st.mlCostDirect[ml-zstdMinMatch]
+							} else {
+								price = p + st.mlCost[mlCode(uint32(ml-zstdMinMatch))]
+							}
+							if o := &opt[cur+ml]; price < o.price {
+								o.mlen = ml
+								o.off = m.off
+								o.litlen = 0
+								o.price = price
+							}
 						}
 					}
 					startML = m.length + 1
@@ -756,8 +795,9 @@ func (e *ultraEncoder) getAllMatches(nextToUpdate3 *int32, ip, iend int32, rep *
 		m := matchIndex - cur
 		// Bytes before min(cs, cl) are known to match.
 		ml := min(cs, cl)
-		if n, ok := ultraCount8(src, ip+ml, m+ml, iLimit); ok {
-			ml += n
+		n8, less, ok := ultraCount8(src, ip+ml, m+ml, iLimit)
+		if ok {
+			ml += n8
 		} else {
 			ml += ultraCount(src, ip+ml, m+ml, iLimit)
 		}
@@ -771,7 +811,10 @@ func (e *ultraEncoder) getAllMatches(nextToUpdate3 *int32, ip, iend int32, rep *
 				break
 			}
 		}
-		if src[m+ml] < src[ip+ml] {
+		if !ok {
+			less = src[m+ml] < src[ip+ml]
+		}
+		if less {
 			*smallerP = uint32(matchIndex)
 			cs = ml
 			if matchIndex <= btLow {
@@ -824,8 +867,9 @@ func (e *ultraEncoder) updateTree(target, iend int32) {
 			next := 2 * (matchIndex & btMask)
 			m := matchIndex - cur
 			ml := min(cs, cl)
-			if n, ok := ultraCount8(src, ip+ml, m+ml, iend); ok {
-				ml += n
+			n8, less, ok := ultraCount8(src, ip+ml, m+ml, iend)
+			if ok {
+				ml += n8
 			} else {
 				ml += ultraCount(src, ip+ml, m+ml, iend)
 			}
@@ -836,7 +880,10 @@ func (e *ultraEncoder) updateTree(target, iend int32) {
 			if ip+ml == iend {
 				break
 			}
-			if src[m+ml] < src[ip+ml] {
+			if !ok {
+				less = src[m+ml] < src[ip+ml]
+			}
+			if less {
 				*smallerP = uint32(matchIndex)
 				cs = ml
 				if matchIndex <= btLow {
@@ -872,12 +919,20 @@ func (e *ultraEncoder) findHash3(nextToUpdate3 *int32, curr int32) int32 {
 	src := e.hist
 	cur := e.cur
 	t := e.hashTable3
-	shift := e.hash3Shift
-	for idx := *nextToUpdate3; idx < curr; idx++ {
-		t[ultraHash3(load3232(src, idx-cur), shift)] = uint32(idx)
+	shift := e.hash3Shift & regmask.Shift32ByUint8
+	idx := *nextToUpdate3
+	if idx < curr {
+		p := idx - cur
+		end := curr - cur
+		_ = src[end+3]
+		for p < end {
+			t[(le.Load32(src, p)<<8*prime3bytes)>>shift] = uint32(idx)
+			idx++
+			p++
+		}
+		*nextToUpdate3 = curr
 	}
-	*nextToUpdate3 = curr
-	return int32(t[ultraHash3(load3232(src, curr-cur), shift)])
+	return int32(t[(le.Load32(src, curr-cur)<<8*prime3bytes)>>shift])
 }
 
 func ultraHash4(u uint32, shift uint8) uint32 {
@@ -898,14 +953,18 @@ func ultraCount(src []byte, a, b, end int32) int32 {
 }
 
 // ultraCount8 is the inlinable fast path of ultraCount.
-// It reports false when the first 8 bytes match or end is closer.
-func ultraCount8(src []byte, a, b, end int32) (int32, bool) {
+// It reports ok=false when the first 8 bytes match or end is closer.
+// When ok=true, less is src[b+n] < src[a+n] without reloading memory.
+func ultraCount8(src []byte, a, b, end int32) (n int32, less, ok bool) {
 	if a+8 <= end {
-		if diff := le.Load64(src, a) ^ le.Load64(src, b); diff != 0 {
-			return int32(bits.TrailingZeros64(diff) >> 3), true
+		va := le.Load64(src, a)
+		vb := le.Load64(src, b)
+		if diff := va ^ vb; diff != 0 {
+			tz := uint(bits.TrailingZeros64(diff)) &^ 7
+			return int32(tz >> 3), byte(vb>>tz) < byte(va>>tz), true
 		}
 	}
-	return 0, false
+	return 0, false, false
 }
 
 // ultraNewRep returns the repeat offsets after a sequence (ZSTD_newRep).
@@ -952,6 +1011,12 @@ func (st *ultraStats) llPrice(l int32) int32 {
 }
 
 func (st *ultraStats) llIncPrice(l int32) int32 {
+	if uint32(l) < 16 {
+		return st.llCost[l] - st.llCost[l-1]
+	}
+	if uint32(l) < 64 {
+		return st.llCost[llCodeTable[l]] - st.llCost[llCodeTable[l-1]]
+	}
 	return st.llPrice(l) - st.llPrice(l-1)
 }
 
@@ -999,10 +1064,17 @@ func (st *ultraStats) rescale(src []byte, d *dict) {
 	for i, f := range st.mlFreq {
 		st.mlCost[i] = int32(mlBitsTable[i])<<8 - ultraWeight(f) + ultraMatchBias
 	}
+	for i, c := range mlCodeTable {
+		st.mlCostDirect[i] = st.mlCost[c]
+	}
 	for i, f := range st.ofFreq {
 		st.ofCost[i] = int32(i)<<8 - ultraWeight(f)
 	}
 	st.setBasePrices()
+	litFloor := st.litBase - 256
+	for i, w := range st.litW {
+		st.litPriceTbl[i] = st.litBase - min(w, litFloor)
+	}
 }
 
 // seed initializes the statistics from the code lengths of the dictionary tables.
@@ -1049,9 +1121,12 @@ func (st *ultraStats) setBasePrices() {
 
 // update adds a stored sequence to the statistics (ZSTD_updateStats).
 func (st *ultraStats) update(lits []byte, offBase uint32, ml int32) {
+	litFloor := st.litBase - 256
 	for _, b := range lits {
 		st.litFreq[b] += 2
-		st.litW[b] = ultraWeight(st.litFreq[b])
+		w := ultraWeight(st.litFreq[b])
+		st.litW[b] = w
+		st.litPriceTbl[b] = st.litBase - min(w, litFloor)
 	}
 	st.litSum += 2 * uint32(len(lits))
 	lc := min(llCode(uint32(len(lits))), maxLLCode)
@@ -1065,7 +1140,16 @@ func (st *ultraStats) update(lits []byte, offBase uint32, ml int32) {
 	mc := mlCode(uint32(ml - zstdMinMatch))
 	st.mlFreq[mc]++
 	st.mlSum++
-	st.mlCost[mc] = int32(mlBitsTable[mc])<<8 - ultraWeight(st.mlFreq[mc]) + ultraMatchBias
+	cost := int32(mlBitsTable[mc])<<8 - ultraWeight(st.mlFreq[mc]) + ultraMatchBias
+	st.mlCost[mc] = cost
+	if mc < 32 {
+		st.mlCostDirect[mc] = cost
+	} else {
+		r := mlCodeDirectRange[mc]
+		for i := r[0]; i < r[1]; i++ {
+			st.mlCostDirect[i] = cost
+		}
+	}
 }
 
 func ultraSum(t []uint32) (sum uint32) {

@@ -81,12 +81,13 @@ func (b *blockEnc) init() {
 	}
 
 	if b.coders.mlEnc == nil {
-		b.coders.mlEnc = &fseEncoder{}
-		b.coders.mlPrev = &fseEncoder{}
-		b.coders.ofEnc = &fseEncoder{}
-		b.coders.ofPrev = &fseEncoder{}
-		b.coders.llEnc = &fseEncoder{}
-		b.coders.llPrev = &fseEncoder{}
+		all := new([6]fseEncoder)
+		b.coders.mlEnc = &all[0]
+		b.coders.mlPrev = &all[1]
+		b.coders.ofEnc = &all[2]
+		b.coders.ofPrev = &all[3]
+		b.coders.llEnc = &all[4]
+		b.coders.llPrev = &all[5]
 	}
 	b.litEnc = &huff0.Scratch{WantLogLess: 4}
 	b.reset(nil)
@@ -805,53 +806,12 @@ func (b *blockEnc) encodeBlock(org []byte, raw, rawAllLits bool) error {
 	seq--
 	wr.flush32()
 
-	// Store sequences in reverse, with the bit writer and states in locals.
-	// flush stores 8 bytes and advances by whole bytes, so each chunk
-	// checks room for seqMaxBytes per sequence plus the store's slack.
-	const seqMaxBytes = 12 // 26 state bits + 63 extra bits.
+	// Store sequences in reverse.
 	w := bitState{c: wr.bitContainer, nb: uint(wr.nBits), pos: len(wr.out)}
 	buf := wr.out[:cap(wr.out)]
 	ofState, mlState, llState := of.state, ml.state, ll.state
 	ofTab, mlTab, llTab := of.stateTable, ml.stateTable, ll.stateTable
-	seqs := b.sequences
-	for seq >= 0 {
-		n := (len(buf) - w.pos - 16) / seqMaxBytes
-		if n <= 0 {
-			buf = slices.Grow(buf[:w.pos], (seq+1)*seqMaxBytes+16)
-			buf = buf[:cap(buf)]
-			continue
-		}
-		for stop := max(seq-n, -1); seq > stop; seq-- {
-			s := seqs[seq]
-			ofB, mlB, llB := ofTT[s.ofCode], mlTT[s.mlCode], llTT[s.llCode]
-
-			// w.nb <= 37 here, and the states add at most 26 bits.
-			w, ofState = w.addState(ofState, ofTab, ofB)
-			w, mlState = w.addState(mlState, mlTab, mlB)
-			w, llState = w.addState(llState, llTab, llB)
-
-			ofBits, mlBits, llBits := ofB.outBits&31, mlB.outBits&31, llB.outBits&31
-			extra := uint64(s.offset&bitMask32[ofBits])<<(mlBits+llBits) |
-				uint64(s.matchLen&bitMask32[mlBits])<<llBits |
-				uint64(s.litLen&bitMask32[llBits])
-			extraN := uint(ofBits + mlBits + llBits)
-			if w.nb+extraN > 63 {
-				w = w.flush(buf)
-				if extraN > 56 {
-					// Only offsets over 24 bits get here.
-					low := uint(mlBits + llBits)
-					w = w.add(extra&(1<<low-1), low).flush(buf)
-					extra >>= low
-					extraN -= low
-				}
-			}
-			w = w.add(extra, extraN).flush(buf)
-
-			if debugSequences {
-				println("Encoded seq", seq, s)
-			}
-		}
-	}
+	w, buf, ofState, mlState, llState = encodeSeqsLoop(w, buf, b.sequences, seq, ofState, mlState, llState, ofTT, mlTT, llTT, ofTab, mlTab, llTab)
 	wr.bitContainer, wr.nBits, wr.out = w.c, uint8(w.nb), buf[:w.pos]
 	of.state, ml.state, ll.state = ofState, mlState, llState
 	ml.flush(mlEnc.actualTableLog)
@@ -988,60 +948,45 @@ func (b *blockEnc) genCodes() {
 	if len(b.sequences) > math.MaxUint16 {
 		panic("can only encode up to 64K sequences")
 	}
-	// No bounds checks after here:
 	llH := b.coders.llEnc.Histogram()
 	ofH := b.coders.ofEnc.Histogram()
 	mlH := b.coders.mlEnc.Histogram()
-	for i := range llH {
-		llH[i] = 0
-	}
-	for i := range ofH {
-		ofH[i] = 0
-	}
-	for i := range mlH {
-		mlH[i] = 0
-	}
+	clear(llH[:maxLiteralLengthSymbol+1])
+	clear(ofH[:maxOffsetBits+1])
+	clear(mlH[:maxMatchLengthSymbol+1])
+
+	genCodesSeqs(b.sequences, llH, ofH, mlH)
 
 	var llMax, ofMax, mlMax uint8
-	for i := range b.sequences {
-		seq := &b.sequences[i]
-		v := llCode(seq.litLen)
-		seq.llCode = v
-		llH[v]++
-		if v > llMax {
-			llMax = v
-		}
-
-		v = ofCode(seq.offset)
-		seq.ofCode = v
-		ofH[v]++
-		if v > ofMax {
-			ofMax = v
-		}
-
-		v = mlCode(seq.matchLen)
-		seq.mlCode = v
-		mlH[v]++
-		if v > mlMax {
-			mlMax = v
-			if debugAsserts && mlMax > maxMatchLengthSymbol {
-				panic(fmt.Errorf("mlMax > maxMatchLengthSymbol (%d), matchlen: %d", mlMax, seq.matchLen))
+	var llMaxCnt, ofMaxCnt, mlMaxCnt uint32
+	for i, c := range llH[:maxLiteralLengthSymbol+1] {
+		if c != 0 {
+			llMax = uint8(i)
+			if c > llMaxCnt {
+				llMaxCnt = c
 			}
 		}
 	}
-	if debugAsserts && mlMax > maxMatchLengthSymbol {
-		panic(fmt.Errorf("mlMax > maxMatchLengthSymbol (%d)", mlMax))
+	for i, c := range ofH[:maxOffsetBits+1] {
+		if c != 0 {
+			ofMax = uint8(i)
+			if c > ofMaxCnt {
+				ofMaxCnt = c
+			}
+		}
 	}
-	if debugAsserts && ofMax > maxOffsetBits {
-		panic(fmt.Errorf("ofMax > maxOffsetBits (%d)", ofMax))
-	}
-	if debugAsserts && llMax > maxLiteralLengthSymbol {
-		panic(fmt.Errorf("llMax > maxLiteralLengthSymbol (%d)", llMax))
+	for i, c := range mlH[:maxMatchLengthSymbol+1] {
+		if c != 0 {
+			mlMax = uint8(i)
+			if c > mlMaxCnt {
+				mlMaxCnt = c
+			}
+		}
 	}
 
-	b.coders.mlEnc.HistogramFinished(mlMax, int(slices.Max(mlH[:mlMax+1])))
-	b.coders.ofEnc.HistogramFinished(ofMax, int(slices.Max(ofH[:ofMax+1])))
-	b.coders.llEnc.HistogramFinished(llMax, int(slices.Max(llH[:llMax+1])))
+	b.coders.mlEnc.HistogramFinished(mlMax, int(mlMaxCnt))
+	b.coders.ofEnc.HistogramFinished(ofMax, int(ofMaxCnt))
+	b.coders.llEnc.HistogramFinished(llMax, int(llMaxCnt))
 }
 
 // The post block splitter (ZSTD_deriveBlockSplits) halves the sequences of a

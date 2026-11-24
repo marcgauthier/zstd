@@ -112,8 +112,9 @@ func (e *Encoder) Reset(w io.Writer) {
 		// that only use EncodeAll don't pay the jobSize cost (up to maxJobSize).
 		js.filling = js.filling[:0]
 		if js.nextPrefix != nil {
-			js.putOverlapBuf(js.nextPrefix)
+			js.putOverlapBuf(js.nextPrefix, js.nextPrefPtr)
 			js.nextPrefix = nil
+			js.nextPrefPtr = nil
 		}
 		js.jobSeq = 0
 		js.flushedSeq = 0
@@ -224,7 +225,7 @@ func (e *Encoder) writeJobs(p []byte) (n int, err error) {
 	js := &s.jobs
 	jobSize := js.jobSize
 	if cap(js.filling) == 0 && len(p) > 0 {
-		js.filling = make([]byte, 0, jobSize)
+		js.filling, js.fillingPtr = js.getInputBuf(jobSize)
 	}
 	for len(p) > 0 {
 		if len(p)+len(js.filling) < jobSize {
@@ -256,6 +257,24 @@ func (e *Encoder) writeJobs(p []byte) (n int, err error) {
 
 func (e *Encoder) writeBlocks(p []byte) (n int, err error) {
 	s := &e.state
+	// Fast path for synchronous single-goroutine streaming: encode full blocks directly
+	// from p without copying through s.filling.
+	if e.o.concurrent == 1 && len(s.filling) == 0 && len(p) >= e.o.blockSize {
+		for len(p) >= e.o.blockSize {
+			block := p[:e.o.blockSize]
+			if e.o.crc {
+				_, _ = s.encoder.CRC().Write(block)
+			}
+			if err := e.encodeSyncBlock(block); err != nil {
+				return n, err
+			}
+			p = p[e.o.blockSize:]
+			n += e.o.blockSize
+		}
+		if len(p) == 0 {
+			return n, nil
+		}
+	}
 	for len(p) > 0 {
 		if len(p)+len(s.filling) < e.o.blockSize {
 			if e.o.crc {
@@ -286,6 +305,47 @@ func (e *Encoder) writeBlocks(p []byte) (n int, err error) {
 		}
 	}
 	return n, nil
+}
+
+// encodeSyncBlock compresses and writes a single non-final block synchronously
+// directly from src without copying into s.filling.
+func (e *Encoder) encodeSyncBlock(src []byte) error {
+	s := &e.state
+	if s.err != nil {
+		return s.err
+	}
+	if !s.headerWritten {
+		var tmp [maxHeaderSize]byte
+		fh := frameHeader{
+			ContentSize:   uint64(s.frameContentSize),
+			WindowSize:    uint32(s.encoder.WindowSize(s.frameContentSize)),
+			SingleSegment: false,
+			Checksum:      e.o.crc,
+			DictID:        e.o.dict.ID(),
+		}
+		dst := fh.appendTo(tmp[:0])
+		s.headerWritten = true
+		var n2 int
+		n2, s.err = s.w.Write(dst)
+		if s.err != nil {
+			return s.err
+		}
+		s.nWritten += int64(n2)
+	}
+	s.nInput += int64(len(src))
+	enc := s.encoder
+	blk := enc.Block()
+	blk.reset(nil)
+	enc.Encode(blk, src)
+	blk.last = false
+	s.err = blk.encode(src, e.o.noEntropy, !e.o.allLitEntropy)
+	if s.err != nil {
+		return s.err
+	}
+	var n2 int
+	n2, s.err = s.w.Write(blk.output)
+	s.nWritten += int64(n2)
+	return s.err
 }
 
 // nextBlock will synchronize and start compressing input in e.state.filling.
@@ -736,6 +796,12 @@ func (e *Encoder) EncodeAll(src, dst []byte) []byte {
 	return e.encodeAll(enc, src, dst)
 }
 
+type sliceEncoder interface {
+	PrepareSlice(totalLen int)
+	EncodeSlice(blk *blockEnc, fullSrc []byte, start, end int)
+	FinishSlice(totalLen int)
+}
+
 func (e *Encoder) encodeAll(enc encoder, src, dst []byte) []byte {
 	if len(src) == 0 {
 		if e.o.fullZero {
@@ -806,9 +872,39 @@ func (e *Encoder) encodeAll(enc encoder, src, dst []byte) []byte {
 		}
 		dst = blk.output
 		blk.output = oldout
+	} else if se, ok := enc.(sliceEncoder); ok && useMatchAsm && e.o.dict == nil && len(src) < 1<<29 {
+		enc.Reset(nil, false)
+		se.PrepareSlice(len(src))
+		blk := enc.Block()
+		oldout := blk.output
+		fullSrc := src
+		for pos := 0; pos < len(fullSrc); {
+			end := min(pos+e.o.blockSize, len(fullSrc))
+			todo := fullSrc[pos:end]
+			if e.o.crc {
+				_, _ = enc.CRC().Write(todo)
+			}
+			blk.pushOffsets()
+			se.EncodeSlice(blk, fullSrc, pos, end)
+			if end == len(fullSrc) {
+				blk.last = true
+			}
+			blk.output = dst
+			err := blk.encode(todo, e.o.noEntropy, !e.o.allLitEntropy)
+			if err != nil {
+				blk.output = oldout
+				panic(err)
+			}
+			dst = blk.output
+			blk.output = oldout
+			blk.reset(nil)
+			pos = end
+		}
+		se.FinishSlice(len(fullSrc))
 	} else {
 		enc.Reset(e.o.dict, false)
 		blk := enc.Block()
+		oldout := blk.output
 		for len(src) > 0 {
 			todo := src
 			if len(todo) > e.o.blockSize {
@@ -823,11 +919,14 @@ func (e *Encoder) encodeAll(enc encoder, src, dst []byte) []byte {
 			if len(src) == 0 {
 				blk.last = true
 			}
+			blk.output = dst
 			err := blk.encode(todo, e.o.noEntropy, !e.o.allLitEntropy)
 			if err != nil {
+				blk.output = oldout
 				panic(err)
 			}
-			dst = append(dst, blk.output...)
+			dst = blk.output
+			blk.output = oldout
 			blk.reset(nil)
 		}
 	}

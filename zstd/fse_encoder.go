@@ -114,7 +114,7 @@ func (s *fseEncoder) allocCtable() {
 func (s *fseEncoder) buildCTable() error {
 	tableSize := uint32(1 << s.actualTableLog)
 	highThreshold := tableSize - 1
-	var cumul [256]int16
+	var cumul [maxEncSymbolValue + 2]int16
 
 	s.allocCtable()
 	tableSymbol := s.ct.tableSymbol[:tableSize]
@@ -156,17 +156,30 @@ func (s *fseEncoder) buildCTable() error {
 		var position uint32
 		// if any symbol > largeLimit, we may have 0 bits output.
 		largeLimit := int16(1 << (s.actualTableLog - 1))
-		for ui, v := range s.norm[:s.symbolLen] {
-			symbol := byte(ui)
-			if v > largeLimit {
-				s.zeroBits = true
-			}
-			for range v {
-				tableSymbol[position] = symbol
-				position = (position + step) & tableMask
-				for position > highThreshold {
+		if highThreshold == tableMask {
+			for ui, v := range s.norm[:s.symbolLen] {
+				symbol := byte(ui)
+				if v > largeLimit {
+					s.zeroBits = true
+				}
+				for range v {
+					tableSymbol[position] = symbol
 					position = (position + step) & tableMask
-				} /* Low proba area */
+				}
+			}
+		} else {
+			for ui, v := range s.norm[:s.symbolLen] {
+				symbol := byte(ui)
+				if v > largeLimit {
+					s.zeroBits = true
+				}
+				for range v {
+					tableSymbol[position] = symbol
+					position = (position + step) & tableMask
+					for position > highThreshold {
+						position = (position + step) & tableMask
+					} /* Low proba area */
+				}
 			}
 		}
 
@@ -177,7 +190,7 @@ func (s *fseEncoder) buildCTable() error {
 	}
 
 	// Build table
-	table := s.ct.stateTable
+	table := s.ct.stateTable[:tableSize]
 	{
 		tsi := int(tableSize)
 		for u, v := range tableSymbol {

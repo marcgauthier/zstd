@@ -34,7 +34,9 @@ func dFastHashS(u, prime uint64) uint32 {
 
 type doubleFastEncoder struct {
 	fastEncoder
-	longTable [dFastLongTableSize]tableEntry
+	longTable   [dFastLongTableSize]tableEntry
+	fixedBias   bool
+	packedFrame bool
 }
 
 type doubleFastEncoderDict struct {
@@ -46,6 +48,7 @@ type doubleFastEncoderDict struct {
 
 // Encode mimmics functionality in zstd_dfast.c
 func (e *doubleFastEncoder) Encode(blk *blockEnc, src []byte) {
+	e.clearFixedPositions()
 	const (
 		// Input margin is the number of bytes we read (8)
 		// and the maximum we will read ahead (2)
@@ -97,6 +100,10 @@ func (e *doubleFastEncoder) Encode(blk *blockEnc, src []byte) {
 	// Override src
 	src = e.hist
 	sLimit := int32(len(src)) - inputMargin
+	if useMatchAsm {
+		doubleFastEncodeAsm(e, blk, src, s, sLimit, true)
+		return
+	}
 	primeL, primeS := hashPrimes8and5()
 	// stepSize is the number of bytes to skip on every main loop iteration.
 	// It should be >= 1.
@@ -377,10 +384,71 @@ encodeLoop:
 	}
 }
 
+// clearFixedPositions prepares the tables for the normal cursor.
+func (e *doubleFastEncoder) clearFixedPositions() {
+	if e.fixedBias {
+		clear(e.table[:])
+		clear(e.longTable[:])
+		e.fixedBias = false
+		e.packedFrame = false
+	}
+}
+
+// PrepareSlice prepares the encoder to encode a contiguous slice directly without copying into e.hist.
+func (e *doubleFastEncoder) PrepareSlice(totalLen int) {
+	fixed := totalLen < 1<<29
+	// Packed positions use 24 bits and the frame must fit in the window.
+	packed := totalLen <= min(int(e.maxMatchOff), 1<<24)
+	rebase := e.cur >= e.bufferReset-int32(totalLen)
+	if packed && !rebase {
+		clear(e.table[:len(e.table)/2])
+		clear(e.longTable[:len(e.longTable)/2])
+	} else if fixed || e.fixedBias || rebase {
+		clear(e.table[:])
+		clear(e.longTable[:])
+	}
+	if rebase {
+		e.cur = e.maxMatchOff
+	}
+	e.fixedBias = fixed
+	e.packedFrame = packed
+}
+
+// FinishSlice invalidates table entries written during EncodeSlice calls.
+func (e *doubleFastEncoder) FinishSlice(totalLen int) {
+	// Delay the clear until the next operation needs the tables.
+	if e.cur < e.bufferReset {
+		e.cur += int32(totalLen)
+	}
+}
+
+// EncodeSlice encodes fullSrc[start:end] using fullSrc[:end] directly as history.
+func (e *doubleFastEncoder) EncodeSlice(blk *blockEnc, fullSrc []byte, start, end int) {
+	const (
+		inputMargin            = 8 + 2
+		minNonLiteralBlockSize = 16
+	)
+	blockLen := end - start
+	blk.size = blockLen
+	if blockLen < minNonLiteralBlockSize {
+		blk.extraLits = blockLen
+		blk.literals = blk.literals[:blockLen]
+		copy(blk.literals, fullSrc[start:end])
+		return
+	}
+	if useMatchAsm {
+		doubleFastEncodeAsm(e, blk, fullSrc[:end], int32(start), int32(end)-inputMargin, true)
+		return
+	}
+	// Portable fallback when noasm is enabled.
+	e.Encode(blk, fullSrc[start:end])
+}
+
 // EncodeNoHist will encode a block with no history and no following blocks.
 // Most notable difference is that src will not be copied for history and
 // we do not need to check for max match length.
 func (e *doubleFastEncoder) EncodeNoHist(blk *blockEnc, src []byte) {
+	e.clearFixedPositions()
 	const (
 		// Input margin is the number of bytes we read (8)
 		// and the maximum we will read ahead (2)
@@ -410,6 +478,13 @@ func (e *doubleFastEncoder) EncodeNoHist(blk *blockEnc, src []byte) {
 
 	// Override src
 	sLimit := int32(len(src)) - inputMargin
+	if useMatchAsm {
+		doubleFastEncodeAsm(e, blk, src, s, sLimit, false)
+		if e.cur < e.bufferReset {
+			e.cur += int32(len(src))
+		}
+		return
+	}
 	primeL, primeS := hashPrimes8and5()
 	// stepSize is the number of bytes to skip on every main loop iteration.
 	// It should be >= 1.
@@ -1051,6 +1126,7 @@ func (e *doubleFastEncoder) Reset(d *dict, singleBlock bool) {
 }
 
 func (e *doubleFastEncoder) ResetPrefix(prefix []byte) {
+	e.clearFixedPositions()
 	e.fastEncoder.ResetPrefix(prefix)
 	if len(prefix) < 8 {
 		return

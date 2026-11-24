@@ -11,19 +11,24 @@ import (
 )
 
 type encJob struct {
-	prefix []byte        // overlap from previous job (nil for first)
-	input  []byte        // job's own input data (swapped from filling)
-	last   bool          // last block of last job gets last=true
-	output []byte        // compressed blocks (filled by worker)
-	err    error         // encoding error
-	done   chan struct{} // closed when complete
+	prefix    []byte        // overlap from previous job (nil for first)
+	input     []byte        // job's own input data (swapped from filling)
+	last      bool          // last block of last job gets last=true
+	output    []byte        // compressed blocks (filled by worker)
+	err       error         // encoding error
+	done      chan struct{} // 1-buffered signal when complete (reusable!)
+	inputPtr  *[]byte       // pooled header for input
+	outputPtr *[]byte       // pooled header for output
+	prefixPtr *[]byte       // pooled header for prefix
 }
 
 type jobState struct {
 	jobSize     int
 	overlapSize int
-	filling     []byte // accumulates input up to jobSize
-	nextPrefix  []byte // overlap prefix prepared for the next dispatched job
+	filling     []byte  // accumulates input up to jobSize
+	fillingPtr  *[]byte // pooled header for filling
+	nextPrefix  []byte  // overlap prefix prepared for the next dispatched job
+	nextPrefPtr *[]byte // pooled header for nextPrefix
 
 	jobSeq int // next job sequence number
 
@@ -40,6 +45,7 @@ type jobState struct {
 	flusherErr error
 	started    bool
 
+	jobPool     sync.Pool // *encJob
 	inputPool   sync.Pool // *[]byte buffers of jobSize cap
 	outputPool  sync.Pool // *[]byte buffers for compressed output
 	overlapPool sync.Pool // *[]byte buffers for overlap prefixes
@@ -73,7 +79,7 @@ func (e *Encoder) jobWorker() {
 		enc := <-e.encoders
 		e.compressJob(enc, job)
 		e.encoders <- enc
-		close(job.done)
+		job.done <- struct{}{}
 	}
 }
 
@@ -92,16 +98,51 @@ func (e *Encoder) compressJob(enc encoder, job *encJob) {
 	}
 
 	data := job.input
+	blk := enc.Block()
 	if len(data) == 0 && job.last {
-		blk := enc.Block()
 		blk.reset(nil)
 		blk.last = true
+		oldOut := blk.output
+		blk.output = job.output
 		blk.encodeRaw(nil)
-		job.output = append(job.output, blk.output...)
+		job.output = blk.output
+		blk.output = oldOut
 		return
 	}
 
-	blk := enc.Block()
+	// Zero-copy slice path when there is no overlap prefix.
+	if len(job.prefix) == 0 {
+		if se, ok := enc.(sliceEncoder); ok && useMatchAsm && len(data) < 1<<29 {
+			se.PrepareSlice(len(data))
+			dst := job.output
+			oldOut := blk.output
+			for pos := 0; pos < len(data); {
+				end := min(pos+e.o.blockSize, len(data))
+				todo := data[pos:end]
+				blk.pushOffsets()
+				se.EncodeSlice(blk, data, pos, end)
+				blk.last = end == len(data) && job.last
+				blk.output = dst
+				err := blk.encode(todo, e.o.noEntropy, !e.o.allLitEntropy)
+				dst = blk.output
+				blk.output = oldOut
+				if err != nil {
+					se.FinishSlice(len(data))
+					job.output = dst
+					job.err = err
+					return
+				}
+				blk.reset(nil)
+				pos = end
+			}
+			se.FinishSlice(len(data))
+			job.output = dst
+			return
+		}
+	}
+
+	dst := job.output
+	oldOut := blk.output
 	for len(data) > 0 {
 		todo := data
 		if len(todo) > e.o.blockSize {
@@ -113,68 +154,103 @@ func (e *Encoder) compressJob(enc encoder, job *encJob) {
 		enc.Encode(blk, todo)
 		blk.last = len(data) == 0 && job.last
 
+		blk.output = dst
 		err := blk.encode(todo, e.o.noEntropy, !e.o.allLitEntropy)
+		dst = blk.output
+		blk.output = oldOut
 		if err != nil {
+			job.output = dst
 			job.err = err
 			return
 		}
-		job.output = append(job.output, blk.output...)
 		blk.reset(nil)
 	}
+	job.output = dst
 }
 
-func (js *jobState) getInputBuf(size int) []byte {
+func (js *jobState) getInputBuf(size int) ([]byte, *[]byte) {
 	if v := js.inputPool.Get(); v != nil {
 		bp := v.(*[]byte)
 		b := *bp
 		if cap(b) >= size {
-			return b[:0]
+			return b[:0], bp
 		}
 	}
-	return make([]byte, 0, size)
+	b := make([]byte, 0, size)
+	return b, &b
 }
 
-func (js *jobState) putInputBuf(b []byte) {
+func (js *jobState) putInputBuf(b []byte, bp *[]byte) {
 	if cap(b) > 0 {
-		b = b[:0]
-		js.inputPool.Put(&b)
+		if bp == nil {
+			bp = new([]byte)
+		}
+		*bp = b[:0]
+		js.inputPool.Put(bp)
 	}
 }
 
-func (js *jobState) getOutputBuf(size int) []byte {
+func (js *jobState) getOutputBuf(size int) ([]byte, *[]byte) {
 	if v := js.outputPool.Get(); v != nil {
 		bp := v.(*[]byte)
 		b := *bp
 		if cap(b) >= size {
-			return b[:0]
+			return b[:0], bp
 		}
 	}
-	return make([]byte, 0, size)
+	b := make([]byte, 0, size)
+	return b, &b
 }
 
-func (js *jobState) putOutputBuf(b []byte) {
+func (js *jobState) putOutputBuf(b []byte, bp *[]byte) {
 	if cap(b) > 0 {
-		b = b[:0]
-		js.outputPool.Put(&b)
+		if bp == nil {
+			bp = new([]byte)
+		}
+		*bp = b[:0]
+		js.outputPool.Put(bp)
 	}
 }
 
-func (js *jobState) getOverlapBuf(size int) []byte {
+func (js *jobState) getOverlapBuf(size int) ([]byte, *[]byte) {
 	if v := js.overlapPool.Get(); v != nil {
 		bp := v.(*[]byte)
 		b := *bp
 		if cap(b) >= size {
-			return b[:size]
+			return b[:size], bp
 		}
 	}
-	return make([]byte, size)
+	b := make([]byte, size)
+	return b, &b
 }
 
-func (js *jobState) putOverlapBuf(b []byte) {
+func (js *jobState) putOverlapBuf(b []byte, bp *[]byte) {
 	if cap(b) > 0 {
-		b = b[:0]
-		js.overlapPool.Put(&b)
+		if bp == nil {
+			bp = new([]byte)
+		}
+		*bp = b[:0]
+		js.overlapPool.Put(bp)
 	}
+}
+
+func (js *jobState) getJob() *encJob {
+	if v := js.jobPool.Get(); v != nil {
+		return v.(*encJob)
+	}
+	return &encJob{done: make(chan struct{}, 1)}
+}
+
+func (js *jobState) putJob(job *encJob) {
+	job.prefix = nil
+	job.input = nil
+	job.output = nil
+	job.inputPtr = nil
+	job.outputPtr = nil
+	job.prefixPtr = nil
+	job.err = nil
+	job.last = false
+	js.jobPool.Put(job)
 }
 
 func (e *Encoder) jobFlusher() {
@@ -185,36 +261,45 @@ func (e *Encoder) jobFlusher() {
 		// Worker has fully exited compressJob, so the prefix is no longer
 		// in use. Return it to the pool regardless of outcome.
 		if job.prefix != nil {
-			js.putOverlapBuf(job.prefix)
+			js.putOverlapBuf(job.prefix, job.prefixPtr)
 			job.prefix = nil
+			job.prefixPtr = nil
 		}
 		if job.err != nil {
+			err := job.err
+			js.putInputBuf(job.input, job.inputPtr)
+			js.putOutputBuf(job.output, job.outputPtr)
+			js.putJob(job)
 			js.mu.Lock()
-			js.flusherErr = job.err
+			js.flusherErr = err
 			js.cond.Broadcast()
 			js.mu.Unlock()
-			for range js.resultCh {
+			for j := range js.resultCh {
+				<-j.done
 			}
 			return
 		}
 		if len(job.output) > 0 {
 			_, err := e.state.w.Write(job.output)
 			if err != nil {
+				js.putInputBuf(job.input, job.inputPtr)
+				js.putOutputBuf(job.output, job.outputPtr)
+				js.putJob(job)
 				js.mu.Lock()
 				js.flusherErr = err
 				js.cond.Broadcast()
 				js.mu.Unlock()
-				for range js.resultCh {
+				for j := range js.resultCh {
+					<-j.done
 				}
 				return
 			}
 			e.state.nWritten += int64(len(job.output))
 		}
-		// Return buffers to pools.
-		js.putInputBuf(job.input)
-		js.putOutputBuf(job.output)
-		job.input = nil
-		job.output = nil
+		// Return buffers and job struct to pools.
+		js.putInputBuf(job.input, job.inputPtr)
+		js.putOutputBuf(job.output, job.outputPtr)
+		js.putJob(job)
 
 		js.mu.Lock()
 		js.flushedSeq++
@@ -310,33 +395,37 @@ func (e *Encoder) dispatchJob(final bool) error {
 		e.startJobWorkers()
 	}
 
-	// Estimate output size for pooled buffer.
-	outputEst := max(len(js.filling)/2, 512)
+	// Size output buffer to worst-case raw block size (3-byte header per block) so compressJob never reallocates.
+	outputEst := len(js.filling) + (len(js.filling)/e.o.blockSize+1)*3 + 64
+	outBuf, outPtr := js.getOutputBuf(outputEst)
 
-	job := &encJob{
-		last:   final,
-		done:   make(chan struct{}),
-		output: js.getOutputBuf(outputEst),
-	}
+	job := js.getJob()
+	job.last = final
+	job.output = outBuf
+	job.outputPtr = outPtr
 
 	// Each job owns its prefix slice; the flusher returns it to the pool
 	// after <-job.done, so workers and dispatch never share a buffer.
 	if js.nextPrefix != nil {
 		job.prefix = js.nextPrefix
+		job.prefixPtr = js.nextPrefPtr
 		js.nextPrefix = nil
+		js.nextPrefPtr = nil
 	}
 
 	// Build the next job's prefix from the tail of this job's input.
 	if !final && len(js.filling) > 0 {
 		overlapLen := min(js.overlapSize, len(js.filling))
-		np := js.getOverlapBuf(overlapLen)
+		np, npPtr := js.getOverlapBuf(overlapLen)
 		copy(np, js.filling[len(js.filling)-overlapLen:])
 		js.nextPrefix = np
+		js.nextPrefPtr = npPtr
 	}
 
 	// Swap filling buffer into job — zero-copy for the input data.
 	job.input = js.filling
-	js.filling = js.getInputBuf(js.jobSize)
+	job.inputPtr = js.fillingPtr
+	js.filling, js.fillingPtr = js.getInputBuf(js.jobSize)
 
 	s.nInput += int64(len(job.input))
 	js.jobSeq++

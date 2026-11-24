@@ -110,23 +110,6 @@ func (e *fastBase) UseBlock(enc *blockEnc) {
 }
 
 func (e *fastBase) matchlen(s, t int32, src []byte) int32 {
-	if debugAsserts {
-		if s < 0 {
-			err := fmt.Sprintf("s (%d) < 0", s)
-			panic(err)
-		}
-		if t < 0 {
-			err := fmt.Sprintf("t (%d) < 0", t)
-			panic(err)
-		}
-		if s-t > e.maxMatchOff {
-			err := fmt.Sprintf("s (%d) - t (%d) > maxMatchOff (%d)", s, t, e.maxMatchOff)
-			panic(err)
-		}
-		if len(src)-int(s) > maxCompressedBlockSize {
-			panic(fmt.Sprintf("len(src)-s (%d) > maxCompressedBlockSize (%d)", len(src)-int(s), maxCompressedBlockSize))
-		}
-	}
 	return int32(matchLen(src[s:], src[t:]))
 }
 

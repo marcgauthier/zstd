@@ -130,6 +130,50 @@ func TestEncoder_EncodeAllSimple(t *testing.T) {
 	}
 }
 
+func TestEncoder_EncodeAllAlternatingBlockSizes(t *testing.T) {
+	input, err := os.ReadFile("testdata/z000028")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const window = 2 * maxCompressedBlockSize
+	multi := bytes.Repeat(input, maxCompressedBlockSize/len(input)+1)
+	overWindow := bytes.Repeat(input, window/len(input)+1)
+	newEncoder := func(t *testing.T) *Encoder {
+		t.Helper()
+		encoder, err := NewWriter(nil, WithEncoderLevel(SpeedDefault), WithEncoderConcurrency(1), WithWindowSize(window))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := encoder.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+		return encoder
+	}
+
+	reused := newEncoder(t)
+	for _, test := range []struct {
+		name string
+		src  []byte
+	}{
+		{"multiblock", multi},
+		{"singleblock", input},
+		{"multiblock again", multi},
+		{"larger than window", overWindow},
+		{"fits window again", multi},
+		{"singleblock again", input},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			want := newEncoder(t).EncodeAll(test.src, nil)
+			got := reused.EncodeAll(test.src, nil)
+			if !bytes.Equal(got, want) {
+				t.Errorf("reused encoder output differs from fresh output (sizes %d and %d)", len(got), len(want))
+			}
+		})
+	}
+}
+
 func TestEncoder_EncodeAllConcurrent(t *testing.T) {
 	in, err := os.ReadFile("testdata/z000028")
 	if err != nil {

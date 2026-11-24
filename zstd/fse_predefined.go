@@ -164,5 +164,22 @@ func initPredefined() {
 			enc.setBits(bitTables[i])
 			enc.preDefined = true
 		}
+		for i := range predefOFCost {
+			tt := fsePredefEnc[tableOffsets].ct.symbolTT[i]
+			predefOFCost[i] = int32(tt.outBits) + int32(tt.deltaNbBits>>16)
+		}
+		for i := range predefMLCost {
+			tt := fsePredefEnc[tableMatchLengths].ct.symbolTT[i]
+			predefMLCost[i] = int32(tt.outBits) + int32(tt.deltaNbBits>>16)
+		}
+		for i := range predefMLDirect {
+			predefMLDirect[i] = predefMLCost[mlCodeTable[i]]
+		}
 	})
 }
+
+var (
+	predefOFCost   [maxOffsetBits + 1]int32
+	predefMLCost   [maxMatchLengthSymbol + 1]int32
+	predefMLDirect [128]int32
+)

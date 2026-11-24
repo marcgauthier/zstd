@@ -1,6 +1,7 @@
 package huff0
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"io"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/klauspost/compress/internal/cpuinfo"
 	"github.com/klauspost/compress/internal/le"
-	"github.com/klauspost/compress/zip"
 )
 
 func TestDecompress1X(t *testing.T) {

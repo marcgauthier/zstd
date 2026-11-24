@@ -5,6 +5,7 @@
 package zstd
 
 import (
+	"archive/zip"
 	"bytes"
 	"errors"
 	"fmt"
@@ -21,7 +22,6 @@ import (
 
 	"github.com/klauspost/compress/huff0"
 	"github.com/klauspost/compress/internal/silesiatest"
-	"github.com/klauspost/compress/zip"
 	"github.com/klauspost/compress/zstd/internal/xxhash"
 )
 

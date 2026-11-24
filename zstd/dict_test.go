@@ -1,6 +1,7 @@
 package zstd
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"io"
@@ -11,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/klauspost/compress/zip"
 )
 
 func TestDecoder_SmallDict(t *testing.T) {

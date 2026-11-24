@@ -1,6 +1,7 @@
 package huff0
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"io"
@@ -12,9 +13,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/klauspost/compress/flate"
-	"github.com/klauspost/compress/zip"
 )
 
 type inputFn func() ([]byte, error)
@@ -890,45 +888,6 @@ func TestLog2Bounds(t *testing.T) {
 		if f := math.Log2(float64(v)) * (1 << 16); float64(lo) > f || float64(hi) < f {
 			t.Fatalf("log2(%d) = %f, bounds %d, %d", v, f, lo, hi)
 		}
-	}
-}
-
-func BenchmarkDeflate(b *testing.B) {
-	for _, tt := range testfiles {
-		test := tt
-		if test.err1X != nil {
-			continue
-		}
-		b.Run(test.name, func(b *testing.B) {
-			dec, err := flate.NewWriter(io.Discard, flate.HuffmanOnly)
-			if err != nil {
-				b.Fatal(err)
-			}
-			if test.err1X != nil {
-				b.Skip("skipping")
-			}
-			buf0, err := test.fn()
-			if err != nil {
-				b.Fatal(err)
-			}
-			if len(buf0) > BlockSizeMax {
-				buf0 = buf0[:BlockSizeMax]
-			}
-			b.ResetTimer()
-			b.ReportAllocs()
-			b.SetBytes(int64(len(buf0)))
-			for i := 0; i < b.N; i++ {
-				dec.Reset(io.Discard)
-				n, err := dec.Write(buf0)
-				if err != nil {
-					b.Fatal(err)
-				}
-				if n != len(buf0) {
-					b.Fatal("mismatch", n, len(buf0))
-				}
-				dec.Close()
-			}
-		})
 	}
 }
 

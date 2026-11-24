@@ -126,3 +126,87 @@ func decompress1x_4b_main_loop_asm(ctx *decompress1xContext) {
 		decompress1x_4b_main_loop_amd64(ctx)
 	}
 }
+
+//go:noescape
+func decompress4x2_main_loop_amd64(ctx *decompress4x2Context)
+
+//go:noescape
+func decompress4x2_8b_main_loop_amd64(ctx *decompress4x2Context)
+
+//go:noescape
+func decompress4x2_4b_main_loop_amd64(ctx *decompress4x2Context)
+
+//go:noescape
+func decompress4x2_main_loop_bmi2(ctx *decompress4x2Context)
+
+//go:noescape
+func decompress4x2_8b_main_loop_bmi2(ctx *decompress4x2Context)
+
+//go:noescape
+func decompress4x2_4b_main_loop_bmi2(ctx *decompress4x2Context)
+
+//go:noescape
+func decompress1x2_main_loop_amd64(ctx *decompress1x2Context)
+
+//go:noescape
+func decompress1x2_8b_main_loop_amd64(ctx *decompress1x2Context)
+
+//go:noescape
+func decompress1x2_4b_main_loop_amd64(ctx *decompress1x2Context)
+
+//go:noescape
+func decompress1x2_main_loop_bmi2(ctx *decompress1x2Context)
+
+//go:noescape
+func decompress1x2_8b_main_loop_bmi2(ctx *decompress1x2Context)
+
+//go:noescape
+func decompress1x2_4b_main_loop_bmi2(ctx *decompress1x2Context)
+
+func decompress4x2_main_loop_asm(ctx *decompress4x2Context) {
+	if cpuinfo.HasBMI2() {
+		decompress4x2_main_loop_bmi2(ctx)
+	} else {
+		decompress4x2_main_loop_amd64(ctx)
+	}
+}
+
+func decompress4x2_8b_main_loop_asm(ctx *decompress4x2Context) {
+	if cpuinfo.HasBMI2() {
+		decompress4x2_8b_main_loop_bmi2(ctx)
+	} else {
+		decompress4x2_8b_main_loop_amd64(ctx)
+	}
+}
+
+func decompress4x2_4b_main_loop_asm(ctx *decompress4x2Context) {
+	if cpuinfo.HasBMI2() {
+		decompress4x2_4b_main_loop_bmi2(ctx)
+	} else {
+		decompress4x2_4b_main_loop_amd64(ctx)
+	}
+}
+
+func decompress1x2_main_loop_asm(ctx *decompress1x2Context) {
+	if cpuinfo.HasBMI2() {
+		decompress1x2_main_loop_bmi2(ctx)
+	} else {
+		decompress1x2_main_loop_amd64(ctx)
+	}
+}
+
+func decompress1x2_8b_main_loop_asm(ctx *decompress1x2Context) {
+	if cpuinfo.HasBMI2() {
+		decompress1x2_8b_main_loop_bmi2(ctx)
+	} else {
+		decompress1x2_8b_main_loop_amd64(ctx)
+	}
+}
+
+func decompress1x2_4b_main_loop_asm(ctx *decompress1x2Context) {
+	if cpuinfo.HasBMI2() {
+		decompress1x2_4b_main_loop_bmi2(ctx)
+	} else {
+		decompress1x2_4b_main_loop_amd64(ctx)
+	}
+}

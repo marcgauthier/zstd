@@ -10,13 +10,24 @@ import (
 )
 
 type dTable struct {
-	single []dEntrySingle
+	single      []dEntrySingle
+	double      []dEntryDouble
+	doubleLog   uint8
+	doubleValid bool
 }
 
 // single-symbols decoding
 type dEntrySingle struct {
 	entry uint16
 }
+
+// double-symbol decoding entry:
+//
+//	bits  0..7 : nbBits (total bits consumed, 1..actualTableLog)
+//	bits  8..15: count  (1 or 2 symbols)
+//	bits 16..23: sym0
+//	bits 24..31: sym1 (0 when count == 1)
+type dEntryDouble uint32
 
 // Uses special code for all tables that are < 8 bits.
 const use8BitTables = true
@@ -142,7 +153,9 @@ func ReadTable(in []byte, s *Scratch) (s2 *Scratch, remain []byte, err error) {
 			current := nextRankStart
 			nextRankStart += rankStats[n] << (n - 1)
 			rankStats[n] = current
+			s.rankStart[n] = current
 		}
+		s.rankStart[s.actualTableLog+1] = nextRankStart
 	}
 
 	// fill DTable (always full size)
@@ -150,6 +163,28 @@ func ReadTable(in []byte, s *Scratch) (s2 *Scratch, remain []byte, err error) {
 	if len(s.dt.single) != tSize {
 		s.dt.single = make([]dEntrySingle, tSize)
 	}
+	s.dt.doubleValid = false
+	s.canRestore = false
+
+	if s.DecodeOnly {
+		s.prevTable = s.prevTable[:0]
+		s.prevTableLog = 0
+		tl1 := uint16(s.actualTableLog) + 1
+		for n, w := range s.huffWeight[:s.symbolLen] {
+			if w == 0 {
+				continue
+			}
+			length := (uint32(1) << w) >> 1
+			d := dEntrySingle{
+				entry: (tl1 - uint16(w)) | (uint16(n) << 8),
+			}
+			rank := rankStats[w]
+			fillSingle(s.dt.single[rank:rank+length], d)
+			rankStats[w] = rank + length
+		}
+		return s, in, nil
+	}
+
 	cTable := s.prevTable
 	if cap(cTable) < maxSymbolValue+1 {
 		cTable = make([]cTableEntry, 0, maxSymbolValue+1)
@@ -157,8 +192,8 @@ func ReadTable(in []byte, s *Scratch) (s2 *Scratch, remain []byte, err error) {
 	cTable = cTable[:maxSymbolValue+1]
 	s.prevTable = cTable[:s.symbolLen]
 	s.prevTableLog = s.actualTableLog
-	s.canRestore = false
 
+	tl1 := uint16(s.actualTableLog) + 1
 	for n, w := range s.huffWeight[:s.symbolLen] {
 		if w == 0 {
 			cTable[n] = cTableEntry{
@@ -169,31 +204,153 @@ func ReadTable(in []byte, s *Scratch) (s2 *Scratch, remain []byte, err error) {
 		}
 		length := (uint32(1) << w) >> 1
 		d := dEntrySingle{
-			entry: uint16(s.actualTableLog+1-w) | (uint16(n) << 8),
+			entry: (tl1 - uint16(w)) | (uint16(n) << 8),
 		}
 
-		rank := &rankStats[w]
+		rank := rankStats[w]
 		cTable[n] = cTableEntry{
-			val:   uint16(*rank >> (w - 1)),
+			val:   uint16(rank >> (w - 1)),
 			nBits: uint8(d.entry),
 		}
 
-		// length is a power of two; runs of 4 or more are filled 4 at a time.
-		single := s.dt.single[*rank : *rank+length]
-		if length >= 4 {
-			for i := 0; i < len(single); i += 4 {
-				s4 := single[i : i+4 : i+4]
-				s4[0], s4[1], s4[2], s4[3] = d, d, d, d
-			}
-		} else {
-			for i := range single {
-				single[i] = d
-			}
-		}
-		*rank += length
+		fillSingle(s.dt.single[rank:rank+length], d)
+		rankStats[w] = rank + length
 	}
 
 	return s, in, nil
+}
+
+// EnsureDouble lazily builds the 2-symbol decoding table when the expected
+// output size justifies the O(1<<doubleLog) table build cost. Safe to call
+// before s.Decoder() on a Scratch not shared across goroutines.
+func (s *Scratch) EnsureDouble(dstSize int, fourStreams bool) {
+	if s.dt.doubleValid {
+		return
+	}
+	tl := s.actualTableLog
+	if tl < 1 || tl > tableLogMax {
+		return
+	}
+	// For small tableLogs (<= 5), a tl-bit table cannot fit two average-length
+	// symbols (e.g. uniform digits with 3-4 bit codes in a 4-5 bit table).
+	// Widening doubleLog to 2*tl (<= 10) guarantees 100% 2-symbol lookups!
+	dl := tl
+	if tl <= 5 {
+		dl = tl * 2
+	}
+	dSize := 1 << dl
+	// Build double table when the decode savings outweigh build cost.
+	// 1X is strictly latency-bound (~2x win); 4X benefits on larger blocks.
+	if fourStreams {
+		if dstSize < dSize*6 {
+			return
+		}
+	} else if dl > tl {
+		if dstSize < dSize {
+			return
+		}
+	} else {
+		if dstSize < dSize/2 {
+			return
+		}
+	}
+	s.buildDouble(dl)
+}
+
+func (s *Scratch) buildDouble(dl uint8) {
+	tl := s.actualTableLog
+	tSize := uint32(1) << tl
+	dSize := uint32(1) << dl
+	if len(s.dt.double) != 1<<tableLogMax {
+		s.dt.double = make([]dEntryDouble, 1<<tableLogMax)
+	}
+	single := s.dt.single[:tSize]
+	dbl := s.dt.double[:dSize]
+
+	if dl == tl {
+		rankStats := s.rankStart
+		for n, w := range s.huffWeight[:s.symbolLen] {
+			if w == 0 {
+				continue
+			}
+			rank := rankStats[w]
+			nb1 := tl + 1 - w
+			if w == 1 {
+				dbl[rank] = dEntryDouble(uint32(nb1) | (1 << 8) | (uint32(n) << 16))
+				rankStats[1] = rank + 1
+				continue
+			}
+			length := uint32(1) << (w - 1)
+			rankStats[w] = rank + length
+			base1 := dEntryDouble(uint32(nb1) | (1 << 8) | (uint32(n) << 16))
+			base2 := uint32(nb1) | (2 << 8) | (uint32(n) << 16)
+
+			// Suffix j fits a 2nd symbol iff (j << nb1) >= rankStart[nb1+1].
+			r := s.rankStart[nb1+1]
+			split := min((r+(uint32(1)<<nb1)-1)>>nb1, length)
+			if split > 0 {
+				fillDouble(dbl[rank:rank+split], base1)
+			}
+			step := uint32(1) << nb1
+			k := split << nb1
+			dst := dbl[rank : rank+length]
+			j := split
+			for ; j+4 <= length; j += 4 {
+				e0 := uint32(single[k].entry)
+				e1 := uint32(single[k+step].entry)
+				e2 := uint32(single[k+2*step].entry)
+				e3 := uint32(single[k+3*step].entry)
+				d4 := dst[j : j+4 : j+4]
+				d4[0] = dEntryDouble((base2 + (e0 & 0xff)) | ((e0 >> 8) << 24))
+				d4[1] = dEntryDouble((base2 + (e1 & 0xff)) | ((e1 >> 8) << 24))
+				d4[2] = dEntryDouble((base2 + (e2 & 0xff)) | ((e2 >> 8) << 24))
+				d4[3] = dEntryDouble((base2 + (e3 & 0xff)) | ((e3 >> 8) << 24))
+				k += 4 * step
+			}
+			for ; j < length; j++ {
+				e2 := uint32(single[k].entry)
+				dst[j] = dEntryDouble((base2 + (e2 & 0xff)) | ((e2 >> 8) << 24))
+				k += step
+			}
+		}
+	} else {
+		// dl == 2*tl (for tl <= 5): every entry fits 2 symbols with zero branches.
+		// Each symbol of weight w occupies (1<<(w-1)) << tl entries in dbl,
+		// repeating each 2nd-symbol entry (1<<(w-1)) times per 1st-symbol slot.
+		rankStats := s.rankStart
+		tMask := tSize - 1
+		for n, w := range s.huffWeight[:s.symbolLen] {
+			if w == 0 {
+				continue
+			}
+			nb1 := tl + 1 - w
+			rank := rankStats[w]
+			length1 := uint32(1) << (w - 1)
+			rankStats[w] = rank + length1
+			base2 := uint32(nb1) | (2 << 8) | (uint32(n) << 16)
+			start := rank << tl
+			total := length1 << tl
+			// Remaining bits after nb1 is (dl - nb1) = tl + w - 1 >= tl.
+			// Shift suffix right by (w - 1) and mask to tl bits to index single.
+			repShift := w - 1
+			dst := dbl[start : start+total]
+			if repShift == 0 {
+				for j := range tSize {
+					e2 := uint32(single[j].entry)
+					dst[j] = dEntryDouble((base2 + (e2 & 0xff)) | ((e2 >> 8) << 24))
+				}
+			} else {
+				rep := uint32(1) << repShift
+				for j := range tSize {
+					e2 := uint32(single[j&tMask].entry)
+					val := dEntryDouble((base2 + (e2 & 0xff)) | ((e2 >> 8) << 24))
+					fillDouble(dst[j*rep:(j+1)*rep], val)
+				}
+			}
+		}
+	}
+	s.dt.doubleLog = dl
+	s.dt.doubleValid = true
 }
 
 // Decompress1X will decompress a 1X encoded stream.
@@ -206,6 +363,9 @@ func (s *Scratch) Decompress1X(in []byte) (out []byte, err error) {
 		s.Out = make([]byte, s.MaxDecodedSize)
 	}
 	s.Out = s.Out[:0:s.MaxDecodedSize]
+	// Only build 2-symbol table if compressed size suggests meaningful output
+	// (avoid penalizing tiny 100B inputs when MaxDecodedSize defaults to 256KB).
+	s.EnsureDouble(len(in)*2, false)
 	s.Out, err = s.Decoder().Decompress1X(s.Out, in)
 	return s.Out, err
 }
@@ -224,6 +384,7 @@ func (s *Scratch) Decompress4X(in []byte, dstSize int) (out []byte, err error) {
 		s.Out = make([]byte, s.MaxDecodedSize)
 	}
 	s.Out = s.Out[:0:dstSize]
+	s.EnsureDouble(dstSize, true)
 	s.Out, err = s.Decoder().Decompress4X(s.Out, in)
 	return s.Out, err
 }

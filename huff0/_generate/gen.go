@@ -44,6 +44,30 @@ func main() {
 		decompress.generateProcedure("decompress1x_4b_main_loop_bmi2", fast4bSymbols)
 	}
 
+	{
+		decompress := decompress4x2{}
+		decompress.generateProcedure("decompress4x2_main_loop_amd64", fastSymbols)
+		decompress.generateProcedure("decompress4x2_8b_main_loop_amd64", fast8bSymbols)
+		decompress.generateProcedure("decompress4x2_4b_main_loop_amd64", fast4bSymbols)
+
+		decompress.bmi2 = true
+		decompress.generateProcedure("decompress4x2_main_loop_bmi2", fastSymbols)
+		decompress.generateProcedure("decompress4x2_8b_main_loop_bmi2", fast8bSymbols)
+		decompress.generateProcedure("decompress4x2_4b_main_loop_bmi2", fast4bSymbols)
+	}
+
+	{
+		decompress := decompress1x2{}
+		decompress.generateProcedure("decompress1x2_main_loop_amd64", fastSymbols)
+		decompress.generateProcedure("decompress1x2_8b_main_loop_amd64", fast8bSymbols)
+		decompress.generateProcedure("decompress1x2_4b_main_loop_amd64", fast4bSymbols)
+
+		decompress.bmi2 = true
+		decompress.generateProcedure("decompress1x2_main_loop_bmi2", fastSymbols)
+		decompress.generateProcedure("decompress1x2_8b_main_loop_bmi2", fast8bSymbols)
+		decompress.generateProcedure("decompress1x2_4b_main_loop_bmi2", fast4bSymbols)
+	}
+
 	Generate()
 }
 
@@ -487,4 +511,289 @@ func (d decompress1x) refill(bits, bitsRead, ip reg.GPVirtual) {
 	ORQ(t, bits)
 	SHRQ(U8(3), r)
 	SUBQ(r, ip)
+}
+
+// decompress4x2 emits the 2-symbol-per-lookup Decompress4X main loops.
+type decompress4x2 struct {
+	bmi2 bool
+}
+
+func (d decompress4x2) generateProcedure(name string, nSyms int) {
+	Package("github.com/klauspost/compress/huff0")
+	TEXT(name, 0, "func(ctx* decompress4x2Context)")
+	Doc(fmt.Sprintf("%s decodes %d double-symbol lookups (up to %d bytes) per stream per reload.", name, nSyms, 2*nSyms))
+	Pragma("noescape")
+
+	ctx := Dereference(Param("ctx"))
+	var ipSlot [4]Mem
+	var endSlot [4]Mem
+	for i := range 4 {
+		ipSlot[i] = AllocLocal(8)
+		endSlot[i] = AllocLocal(8)
+	}
+	innerSlot := AllocLocal(8)
+	peekBits := GP64()
+	table := GP64()
+	var op, bits [4]reg.GPVirtual
+	for i := range 4 {
+		op[i] = GP64()
+		bits[i] = GP64()
+	}
+	Comment("Preload values")
+	Load(ctx.Field("peekBits"), peekBits)
+	Load(ctx.Field("tbl"), table)
+	Load(ctx.Field("out"), op[0])
+	{
+		dstEvery := GP64()
+		dstSize := GP64()
+		Load(ctx.Field("dstEvery"), dstEvery)
+		Load(ctx.Field("dstSize"), dstSize)
+		LEAQ(Mem{Base: op[0], Index: dstEvery, Scale: 1}, op[1])
+		LEAQ(Mem{Base: op[0], Index: dstEvery, Scale: 2}, op[2])
+		LEAQ(Mem{Base: dstEvery, Index: dstEvery, Scale: 2}, op[3])
+		ADDQ(op[0], op[3])
+		MOVQ(op[1], endSlot[0])
+		MOVQ(op[2], endSlot[1])
+		MOVQ(op[3], endSlot[2])
+		ADDQ(op[0], dstSize)
+		MOVQ(dstSize, endSlot[3])
+	}
+
+	Comment("Copy the input pointers to their stack slots")
+	for i := range 4 {
+		t := GP64()
+		Load(ctx.Field("ip").Index(i), t)
+		MOVQ(t, ipSlot[i])
+	}
+
+	Comment("Convert each bit reader to sentinel form: bits = value | 1<<bitsRead")
+	{
+		br := GP64()
+		Load(ctx.Field("pbr"), br)
+		for i := range 4 {
+			off := i * bitReader__size
+			tmp := GP64()
+			MOVQ(Mem{Base: br, Disp: off + bitReader_value}, bits[i])
+			MOVBQZX(Mem{Base: br, Disp: off + bitReader_bitsRead}, tmp)
+			BTSQ(tmp, bits[i])
+		}
+	}
+
+	Label("outer_loop")
+	{
+		ctx := Dereference(Param("ctx"))
+		outShift := outputBoundShift(2 * nSyms)
+		Commentf("Iterations allowed by the output: min_i((end[i] - op[i]) / %d)", 1<<outShift)
+		iters := GP64()
+		MOVQ(endSlot[0], iters)
+		SUBQ(op[0], iters)
+		JLE(LabelRef("done"))
+		SHRQ(U8(outShift), iters)
+		for i := 1; i < 4; i++ {
+			t := GP64()
+			MOVQ(endSlot[i], t)
+			SUBQ(op[i], t)
+			JLE(LabelRef("done"))
+			SHRQ(U8(outShift), t)
+			CMPQ(t, iters)
+			CMOVQCS(t, iters)
+		}
+
+		ilowest, _ := ctx.Field("ilowest").Resolve()
+		for i := range 4 {
+			t := GP64()
+			MOVQ(ipSlot[i], t)
+			SUBQ(ilowest.Addr, t)
+			SHRQ(U8(3), t)
+			CMPQ(t, iters)
+			CMOVQCS(t, iters)
+		}
+		TESTQ(iters, iters)
+		JZ(LabelRef("done"))
+		MOVQ(iters, innerSlot)
+	}
+
+	PCALIGN(U8(64))
+	Label("inner_loop")
+	for k := range nSyms {
+		for i := range 4 {
+			Commentf("stream %d, lookup %d", i, k)
+			d.decodeSymbol2(bits[i], op[i], peekBits, table)
+		}
+	}
+	Comment("Reload the four bit containers")
+	rel := decompress4x{bmi2: d.bmi2}
+	for i := range 4 {
+		rel.reload(bits[i], ipSlot[i])
+	}
+	DECQ(innerSlot)
+	JNZ(LabelRef("inner_loop"))
+	JMP(LabelRef("outer_loop"))
+
+	Label("done")
+	ctx = Dereference(Param("ctx"))
+	{
+		br := GP64()
+		Load(ctx.Field("pbr"), br)
+		for i := range 4 {
+			off := i * bitReader__size
+			tmp := GP64()
+			MOVQ(ipSlot[i], tmp)
+			SUBQ(Mem{Base: br, Disp: off + bitReader_in}, tmp)
+			MOVQ(tmp, Mem{Base: br, Disp: off + bitReader_off})
+			MOVQ(bits[i], Mem{Base: br, Disp: off + bitReader_value})
+		}
+	}
+	{
+		start := GP64()
+		dstEvery := GP64()
+		Load(ctx.Field("out"), start)
+		Load(ctx.Field("dstEvery"), dstEvery)
+		for i := range 4 {
+			SUBQ(start, op[i])
+			Store(op[i], ctx.Field("decoded").Index(i))
+			if i < 3 {
+				ADDQ(dstEvery, start)
+			}
+		}
+	}
+	RET()
+}
+
+func (d decompress4x2) decodeSymbol2(bits, op, peekBits, table reg.GPVirtual) {
+	AX := reg.RAX
+	cnt := reg.RDX
+	if d.bmi2 {
+		SHRXQ(peekBits, bits, AX)
+		MOVL(Mem{Base: table, Index: AX, Scale: 4}, AX.As32())
+		SHLXQ(AX, bits, bits)
+		MOVBLZX(reg.AH, cnt.As32())
+		SHRQ(U8(16), AX)
+		MOVW(AX.As16(), Mem{Base: op})
+		ADDQ(cnt, op)
+		return
+	}
+	MOVQ(peekBits, reg.RCX)
+	MOVQ(bits, AX)
+	SHRQ(reg.CL, AX)
+	MOVL(Mem{Base: table, Index: AX, Scale: 4}, AX.As32())
+	MOVQ(AX, reg.RCX)
+	SHLQ(reg.CL, bits)
+	MOVBLZX(reg.AH, cnt.As32())
+	SHRQ(U8(16), AX)
+	MOVW(AX.As16(), Mem{Base: op})
+	ADDQ(cnt, op)
+}
+
+// decompress1x2 emits the 2-symbol-per-lookup Decompress1X main loops.
+type decompress1x2 struct {
+	bmi2 bool
+}
+
+func (d decompress1x2) generateProcedure(name string, nSyms int) {
+	Package("github.com/klauspost/compress/huff0")
+	TEXT(name, 0, "func(ctx* decompress1x2Context)")
+	Doc(fmt.Sprintf("%s decodes %d double-symbol lookups (up to %d bytes) per refill from one huff0 stream.", name, nSyms, 2*nSyms))
+	Pragma("noescape")
+
+	ctx := Dereference(Param("ctx"))
+	peekBits := GP64()
+	table := GP64()
+	op := GP64()
+	limit := GP64()
+	ip := GP64()
+	ilowest := GP64()
+	bits := GP64()
+	bitsRead := GP64()
+
+	Comment("Preload values")
+	Load(ctx.Field("peekBits"), peekBits)
+	Load(ctx.Field("tbl"), table)
+	Load(ctx.Field("out"), op)
+	Load(ctx.Field("outCap"), limit)
+	ADDQ(op, limit)
+	Load(ctx.Field("ip"), ip)
+	Load(ctx.Field("ilowest"), ilowest)
+	{
+		br := GP64()
+		Load(ctx.Field("pbr"), br)
+		MOVQ(Mem{Base: br, Disp: bitReader_value}, bits)
+		MOVBQZX(Mem{Base: br, Disp: bitReader_bitsRead}, bitsRead)
+	}
+
+	inner := GP64()
+	Label("outer_loop")
+	{
+		outShift := outputBoundShift(2 * nSyms)
+		Commentf("Iterations allowed by the output: (limit - op) / %d", 1<<outShift)
+		MOVQ(limit, inner)
+		SUBQ(op, inner)
+		JLE(LabelRef("done"))
+		SHRQ(U8(outShift), inner)
+
+		t := GP64()
+		MOVQ(ip, t)
+		SUBQ(ilowest, t)
+		SHRQ(U8(3), t)
+		CMPQ(t, inner)
+		CMOVQCS(t, inner)
+		TESTQ(inner, inner)
+		JZ(LabelRef("done"))
+	}
+
+	PCALIGN(U8(64))
+	Label("inner_loop")
+	for k := range nSyms {
+		Commentf("lookup %d", k)
+		d.decodeSymbol2(bits, bitsRead, op, peekBits, table)
+	}
+	Comment("Refill the whole bytes consumed from below the window")
+	ref := decompress1x{bmi2: d.bmi2}
+	ref.refill(bits, bitsRead, ip)
+	DECQ(inner)
+	JNZ(LabelRef("inner_loop"))
+	JMP(LabelRef("outer_loop"))
+
+	Label("done")
+	{
+		br := GP64()
+		Load(ctx.Field("pbr"), br)
+		SUBQ(Mem{Base: br, Disp: bitReader_in}, ip)
+		MOVQ(ip, Mem{Base: br, Disp: bitReader_off})
+		MOVQ(bits, Mem{Base: br, Disp: bitReader_value})
+		MOVB(bitsRead.As8(), Mem{Base: br, Disp: bitReader_bitsRead})
+	}
+	{
+		ctxout, _ := ctx.Field("out").Resolve()
+		SUBQ(ctxout.Addr, op)
+		Store(op, ctx.Field("decoded"))
+	}
+	RET()
+}
+
+func (d decompress1x2) decodeSymbol2(bits, bitsRead, op, peekBits, table reg.GPVirtual) {
+	AX := reg.RAX
+	cnt := reg.RDX
+	if d.bmi2 {
+		SHRXQ(peekBits, bits, AX)
+		MOVL(Mem{Base: table, Index: AX, Scale: 4}, AX.As32())
+		SHLXQ(AX, bits, bits)
+		ADDQ(AX, bitsRead)
+		MOVBLZX(reg.AH, cnt.As32())
+		SHRQ(U8(16), AX)
+		MOVW(AX.As16(), Mem{Base: op})
+		ADDQ(cnt, op)
+		return
+	}
+	MOVQ(peekBits, reg.RCX)
+	MOVQ(bits, AX)
+	SHRQ(reg.CL, AX)
+	MOVL(Mem{Base: table, Index: AX, Scale: 4}, AX.As32())
+	MOVQ(AX, reg.RCX)
+	SHLQ(reg.CL, bits)
+	ADDQ(AX, bitsRead)
+	MOVBLZX(reg.AH, cnt.As32())
+	SHRQ(U8(16), AX)
+	MOVW(AX.As16(), Mem{Base: op})
+	ADDQ(cnt, op)
 }

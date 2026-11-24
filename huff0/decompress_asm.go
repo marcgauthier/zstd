@@ -30,6 +30,31 @@ type decompress4xContext struct {
 	ip       [4]*byte // each stream's 8-byte input window, advanced by the asm
 }
 
+// decompress4x2Context is the argument block of the 2-symbol Decompress4X asm loops.
+type decompress4x2Context struct {
+	pbr      *[4]bitReaderShifted
+	peekBits uint8
+	out      *byte
+	dstEvery int
+	dstSize  int
+	tbl      *dEntryDouble
+	decoded  [4]int
+	ilowest  *byte
+	ip       [4]*byte
+}
+
+// decompress1x2Context is the argument block of the 2-symbol Decompress1X asm loops.
+type decompress1x2Context struct {
+	pbr      *bitReaderShifted
+	peekBits uint8
+	out      *byte
+	outCap   int
+	tbl      *dEntryDouble
+	decoded  int
+	ilowest  *byte
+	ip       *byte
+}
+
 // Symbols decoded per stream between reloads by the 4X asm loops; must
 // match the constants of the same names in _generate/gen.go.
 const (
@@ -51,7 +76,7 @@ func (d *Decoder) Decompress4X(dst, src []byte) ([]byte, error) {
 	}
 
 	use8BitTables := d.actualTableLog <= 8
-	if cap(dst) < fallback8BitSize && use8BitTables {
+	if cap(dst) < fallback8BitSize && use8BitTables && (!d.dt.doubleValid || cap(dst) < 256) {
 		return d.decompress4X8bit(dst, src)
 	}
 
@@ -85,6 +110,7 @@ func (d *Decoder) Decompress4X(dst, src []byte) ([]byte, error) {
 	single := d.dt.single[:tlSize]
 
 	var decoded int
+	var streamDecoded [4]int
 
 	nSyms := fastSymbols
 	if d.actualTableLog <= 4 {
@@ -92,13 +118,38 @@ func (d *Decoder) Decompress4X(dst, src []byte) ([]byte, error) {
 	} else if use8BitTables {
 		nSyms = fast8bSymbols
 	}
-	// The asm writes nSyms bytes per stream per iteration and only re-checks
-	// its bounds between batches of iterations (the batch size is derived
-	// from limit in _generate/gen.go), so stream 0 must stop early enough
-	// that stream 3 (which may be up to 3 bytes shorter than dstEvery)
-	// never writes past the end of out. Every stream needs a full 8-byte
-	// window ahead of its read pointer to enter the loop.
-	if limit := dstEvery - nSyms - 2; limit > 0 && br[0].canUseAsm() && br[1].canUseAsm() && br[2].canUseAsm() && br[3].canUseAsm() {
+	if d.dt.doubleValid && dstSize >= 32 && dstEvery >= 16 && br[0].canUseAsm() && br[1].canUseAsm() && br[2].canUseAsm() && br[3].canUseAsm() {
+		dl := d.dt.doubleLog
+		for i := range br {
+			br[i].prepareForAsm()
+		}
+		ctx := decompress4x2Context{
+			pbr:      &br,
+			peekBits: uint8((64 - dl) & 63),
+			out:      &out[0],
+			dstEvery: dstEvery,
+			dstSize:  dstSize,
+			tbl:      &d.dt.double[0],
+			ilowest:  &src[0],
+		}
+		for i := range br {
+			ctx.ip[i] = &br[i].in[br[i].off]
+		}
+		if dl <= 4 {
+			decompress4x2_4b_main_loop_asm(&ctx)
+		} else if dl <= 8 {
+			decompress4x2_8b_main_loop_asm(&ctx)
+		} else {
+			decompress4x2_main_loop_asm(&ctx)
+		}
+		streamDecoded = ctx.decoded
+		decoded = streamDecoded[0] + streamDecoded[1] + streamDecoded[2] + streamDecoded[3]
+		for i := range br {
+			if err := br[i].restoreFromAsm(); err != nil {
+				return nil, err
+			}
+		}
+	} else if limit := dstEvery - nSyms - 2; limit > 0 && br[0].canUseAsm() && br[1].canUseAsm() && br[2].canUseAsm() && br[3].canUseAsm() {
 		for i := range br {
 			br[i].prepareForAsm()
 		}
@@ -129,7 +180,8 @@ func (d *Decoder) Decompress4X(dst, src []byte) ([]byte, error) {
 		}
 
 		decoded = ctx.decoded
-		out = out[decoded/4:]
+		perStream := decoded / 4
+		streamDecoded = [4]int{perStream, perStream, perStream, perStream}
 		for i := range br {
 			if err := br[i].restoreFromAsm(); err != nil {
 				return nil, err
@@ -138,10 +190,10 @@ func (d *Decoder) Decompress4X(dst, src []byte) ([]byte, error) {
 	}
 
 	// Decode remaining.
-	remainBytes := dstEvery - (decoded / 4)
 	for i := range br {
-		offset := dstEvery * i
-		endsAt := min(offset+remainBytes, len(out))
+		startOff := dstEvery*i + streamDecoded[i]
+		offset := startOff
+		endsAt := min(dstEvery*(i+1), dstSize)
 		br := &br[i]
 		bitsLeft := br.remaining()
 		for bitsLeft > 0 {
@@ -162,7 +214,7 @@ func (d *Decoder) Decompress4X(dst, src []byte) ([]byte, error) {
 		if offset != endsAt {
 			return nil, fmt.Errorf("corruption detected: short output block %d, end %d != %d", i, offset, endsAt)
 		}
-		decoded += offset - dstEvery*i
+		decoded += offset - startOff
 		err = br.close()
 		if err != nil {
 			return nil, err
@@ -213,7 +265,27 @@ func (d *Decoder) Decompress1X(dst, src []byte) ([]byte, error) {
 	// needs at most 7 bits consumed on entry so that a batch cannot run
 	// the container dry, which prepareForAsm establishes.
 	decoded := 0
-	if maxDecodedSize >= 16 && br.canUseAsm() {
+	if d.dt.doubleValid && maxDecodedSize >= 32 && br.canUseAsm() {
+		dl := d.dt.doubleLog
+		br.prepareForAsm()
+		ctx := decompress1x2Context{
+			pbr:      &br,
+			out:      &dst[0],
+			outCap:   maxDecodedSize,
+			peekBits: uint8((64 - dl) & 63),
+			tbl:      &d.dt.double[0],
+			ilowest:  &src[0],
+			ip:       &br.in[br.off],
+		}
+		if dl <= 4 {
+			decompress1x2_4b_main_loop_asm(&ctx)
+		} else if dl <= 8 {
+			decompress1x2_8b_main_loop_asm(&ctx)
+		} else {
+			decompress1x2_main_loop_asm(&ctx)
+		}
+		decoded = ctx.decoded
+	} else if maxDecodedSize >= 16 && br.canUseAsm() {
 		br.prepareForAsm()
 		ctx := decompress1xContext{
 			pbr:      &br,

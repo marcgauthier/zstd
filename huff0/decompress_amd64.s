@@ -3474,3 +3474,4210 @@ done:
 	SUBQ 16(AX), BX
 	MOVQ BX, 40(AX)
 	RET
+
+// func decompress4x2_main_loop_amd64(ctx *decompress4x2Context)
+// Requires: BMI, CMOV
+TEXT ·decompress4x2_main_loop_amd64(SB), $72-8
+	MOVQ ctx+0(FP), AX
+
+	// Preload values
+	MOVBQZX 8(AX), BX
+	MOVQ    40(AX), SI
+	MOVQ    16(AX), DI
+	MOVQ    24(AX), DX
+	MOVQ    32(AX), CX
+	LEAQ    (DI)(DX*1), R9
+	LEAQ    (DI)(DX*2), R11
+	LEAQ    (DX)(DX*2), R13
+	ADDQ    DI, R13
+	MOVQ    R9, 8(SP)
+	MOVQ    R11, 24(SP)
+	MOVQ    R13, 40(SP)
+	ADDQ    DI, CX
+	MOVQ    CX, 56(SP)
+
+	// Copy the input pointers to their stack slots
+	MOVQ 88(AX), CX
+	MOVQ CX, (SP)
+	MOVQ 96(AX), CX
+	MOVQ CX, 16(SP)
+	MOVQ 104(AX), CX
+	MOVQ CX, 32(SP)
+	MOVQ 112(AX), CX
+	MOVQ CX, 48(SP)
+
+	// Convert each bit reader to sentinel form: bits = value | 1<<bitsRead
+	MOVQ    (AX), AX
+	MOVQ    32(AX), R8
+	MOVBQZX 40(AX), CX
+	BTSQ    CX, R8
+	MOVQ    80(AX), R10
+	MOVBQZX 88(AX), CX
+	BTSQ    CX, R10
+	MOVQ    128(AX), R12
+	MOVBQZX 136(AX), CX
+	BTSQ    CX, R12
+	MOVQ    176(AX), R14
+	MOVBQZX 184(AX), AX
+	BTSQ    AX, R14
+
+outer_loop:
+	MOVQ ctx+0(FP), AX
+
+	// Iterations allowed by the output: min_i((end[i] - op[i]) / 16)
+	MOVQ    8(SP), CX
+	SUBQ    DI, CX
+	JLE     done
+	SHRQ    $0x04, CX
+	MOVQ    24(SP), DX
+	SUBQ    R9, DX
+	JLE     done
+	SHRQ    $0x04, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    40(SP), DX
+	SUBQ    R11, DX
+	JLE     done
+	SHRQ    $0x04, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    56(SP), DX
+	SUBQ    R13, DX
+	JLE     done
+	SHRQ    $0x04, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    (SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    16(SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    32(SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    48(SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	TESTQ   CX, CX
+	JZ      done
+	MOVQ    CX, 64(SP)
+	PCALIGN $0x40
+
+inner_loop:
+	// stream 0, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// Reload the four bit containers
+	TZCNTQ R8, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   (SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, (SP)
+	MOVQ   (DX), R8
+	ORQ    $0x01, R8
+	SHLQ   CL, R8
+	TZCNTQ R10, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   16(SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, 16(SP)
+	MOVQ   (DX), R10
+	ORQ    $0x01, R10
+	SHLQ   CL, R10
+	TZCNTQ R12, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   32(SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, 32(SP)
+	MOVQ   (DX), R12
+	ORQ    $0x01, R12
+	SHLQ   CL, R12
+	TZCNTQ R14, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   48(SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, 48(SP)
+	MOVQ   (DX), R14
+	ORQ    $0x01, R14
+	SHLQ   CL, R14
+	DECQ   64(SP)
+	JNZ    inner_loop
+	JMP    outer_loop
+
+done:
+	MOVQ ctx+0(FP), AX
+	MOVQ (AX), CX
+	MOVQ (SP), DX
+	SUBQ (CX), DX
+	MOVQ DX, 24(CX)
+	MOVQ R8, 32(CX)
+	MOVQ 16(SP), DX
+	SUBQ 48(CX), DX
+	MOVQ DX, 72(CX)
+	MOVQ R10, 80(CX)
+	MOVQ 32(SP), DX
+	SUBQ 96(CX), DX
+	MOVQ DX, 120(CX)
+	MOVQ R12, 128(CX)
+	MOVQ 48(SP), DX
+	SUBQ 144(CX), DX
+	MOVQ DX, 168(CX)
+	MOVQ R14, 176(CX)
+	MOVQ 16(AX), CX
+	MOVQ 24(AX), DX
+	SUBQ CX, DI
+	MOVQ DI, 48(AX)
+	ADDQ DX, CX
+	SUBQ CX, R9
+	MOVQ R9, 56(AX)
+	ADDQ DX, CX
+	SUBQ CX, R11
+	MOVQ R11, 64(AX)
+	ADDQ DX, CX
+	SUBQ CX, R13
+	MOVQ R13, 72(AX)
+	RET
+
+// func decompress4x2_8b_main_loop_amd64(ctx *decompress4x2Context)
+// Requires: BMI, CMOV
+TEXT ·decompress4x2_8b_main_loop_amd64(SB), $72-8
+	MOVQ ctx+0(FP), AX
+
+	// Preload values
+	MOVBQZX 8(AX), BX
+	MOVQ    40(AX), SI
+	MOVQ    16(AX), DI
+	MOVQ    24(AX), DX
+	MOVQ    32(AX), CX
+	LEAQ    (DI)(DX*1), R9
+	LEAQ    (DI)(DX*2), R11
+	LEAQ    (DX)(DX*2), R13
+	ADDQ    DI, R13
+	MOVQ    R9, 8(SP)
+	MOVQ    R11, 24(SP)
+	MOVQ    R13, 40(SP)
+	ADDQ    DI, CX
+	MOVQ    CX, 56(SP)
+
+	// Copy the input pointers to their stack slots
+	MOVQ 88(AX), CX
+	MOVQ CX, (SP)
+	MOVQ 96(AX), CX
+	MOVQ CX, 16(SP)
+	MOVQ 104(AX), CX
+	MOVQ CX, 32(SP)
+	MOVQ 112(AX), CX
+	MOVQ CX, 48(SP)
+
+	// Convert each bit reader to sentinel form: bits = value | 1<<bitsRead
+	MOVQ    (AX), AX
+	MOVQ    32(AX), R8
+	MOVBQZX 40(AX), CX
+	BTSQ    CX, R8
+	MOVQ    80(AX), R10
+	MOVBQZX 88(AX), CX
+	BTSQ    CX, R10
+	MOVQ    128(AX), R12
+	MOVBQZX 136(AX), CX
+	BTSQ    CX, R12
+	MOVQ    176(AX), R14
+	MOVBQZX 184(AX), AX
+	BTSQ    AX, R14
+
+outer_loop:
+	MOVQ ctx+0(FP), AX
+
+	// Iterations allowed by the output: min_i((end[i] - op[i]) / 16)
+	MOVQ    8(SP), CX
+	SUBQ    DI, CX
+	JLE     done
+	SHRQ    $0x04, CX
+	MOVQ    24(SP), DX
+	SUBQ    R9, DX
+	JLE     done
+	SHRQ    $0x04, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    40(SP), DX
+	SUBQ    R11, DX
+	JLE     done
+	SHRQ    $0x04, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    56(SP), DX
+	SUBQ    R13, DX
+	JLE     done
+	SHRQ    $0x04, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    (SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    16(SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    32(SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    48(SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	TESTQ   CX, CX
+	JZ      done
+	MOVQ    CX, 64(SP)
+	PCALIGN $0x40
+
+inner_loop:
+	// stream 0, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 5
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 5
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 5
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 5
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 6
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 6
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 6
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 6
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// Reload the four bit containers
+	TZCNTQ R8, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   (SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, (SP)
+	MOVQ   (DX), R8
+	ORQ    $0x01, R8
+	SHLQ   CL, R8
+	TZCNTQ R10, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   16(SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, 16(SP)
+	MOVQ   (DX), R10
+	ORQ    $0x01, R10
+	SHLQ   CL, R10
+	TZCNTQ R12, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   32(SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, 32(SP)
+	MOVQ   (DX), R12
+	ORQ    $0x01, R12
+	SHLQ   CL, R12
+	TZCNTQ R14, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   48(SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, 48(SP)
+	MOVQ   (DX), R14
+	ORQ    $0x01, R14
+	SHLQ   CL, R14
+	DECQ   64(SP)
+	JNZ    inner_loop
+	JMP    outer_loop
+
+done:
+	MOVQ ctx+0(FP), AX
+	MOVQ (AX), CX
+	MOVQ (SP), DX
+	SUBQ (CX), DX
+	MOVQ DX, 24(CX)
+	MOVQ R8, 32(CX)
+	MOVQ 16(SP), DX
+	SUBQ 48(CX), DX
+	MOVQ DX, 72(CX)
+	MOVQ R10, 80(CX)
+	MOVQ 32(SP), DX
+	SUBQ 96(CX), DX
+	MOVQ DX, 120(CX)
+	MOVQ R12, 128(CX)
+	MOVQ 48(SP), DX
+	SUBQ 144(CX), DX
+	MOVQ DX, 168(CX)
+	MOVQ R14, 176(CX)
+	MOVQ 16(AX), CX
+	MOVQ 24(AX), DX
+	SUBQ CX, DI
+	MOVQ DI, 48(AX)
+	ADDQ DX, CX
+	SUBQ CX, R9
+	MOVQ R9, 56(AX)
+	ADDQ DX, CX
+	SUBQ CX, R11
+	MOVQ R11, 64(AX)
+	ADDQ DX, CX
+	SUBQ CX, R13
+	MOVQ R13, 72(AX)
+	RET
+
+// func decompress4x2_4b_main_loop_amd64(ctx *decompress4x2Context)
+// Requires: BMI, CMOV
+TEXT ·decompress4x2_4b_main_loop_amd64(SB), $72-8
+	MOVQ ctx+0(FP), AX
+
+	// Preload values
+	MOVBQZX 8(AX), BX
+	MOVQ    40(AX), SI
+	MOVQ    16(AX), DI
+	MOVQ    24(AX), DX
+	MOVQ    32(AX), CX
+	LEAQ    (DI)(DX*1), R9
+	LEAQ    (DI)(DX*2), R11
+	LEAQ    (DX)(DX*2), R13
+	ADDQ    DI, R13
+	MOVQ    R9, 8(SP)
+	MOVQ    R11, 24(SP)
+	MOVQ    R13, 40(SP)
+	ADDQ    DI, CX
+	MOVQ    CX, 56(SP)
+
+	// Copy the input pointers to their stack slots
+	MOVQ 88(AX), CX
+	MOVQ CX, (SP)
+	MOVQ 96(AX), CX
+	MOVQ CX, 16(SP)
+	MOVQ 104(AX), CX
+	MOVQ CX, 32(SP)
+	MOVQ 112(AX), CX
+	MOVQ CX, 48(SP)
+
+	// Convert each bit reader to sentinel form: bits = value | 1<<bitsRead
+	MOVQ    (AX), AX
+	MOVQ    32(AX), R8
+	MOVBQZX 40(AX), CX
+	BTSQ    CX, R8
+	MOVQ    80(AX), R10
+	MOVBQZX 88(AX), CX
+	BTSQ    CX, R10
+	MOVQ    128(AX), R12
+	MOVBQZX 136(AX), CX
+	BTSQ    CX, R12
+	MOVQ    176(AX), R14
+	MOVBQZX 184(AX), AX
+	BTSQ    AX, R14
+
+outer_loop:
+	MOVQ ctx+0(FP), AX
+
+	// Iterations allowed by the output: min_i((end[i] - op[i]) / 32)
+	MOVQ    8(SP), CX
+	SUBQ    DI, CX
+	JLE     done
+	SHRQ    $0x05, CX
+	MOVQ    24(SP), DX
+	SUBQ    R9, DX
+	JLE     done
+	SHRQ    $0x05, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    40(SP), DX
+	SUBQ    R11, DX
+	JLE     done
+	SHRQ    $0x05, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    56(SP), DX
+	SUBQ    R13, DX
+	JLE     done
+	SHRQ    $0x05, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    (SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    16(SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    32(SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	MOVQ    48(SP), DX
+	SUBQ    80(AX), DX
+	SHRQ    $0x03, DX
+	CMPQ    DX, CX
+	CMOVQCS DX, CX
+	TESTQ   CX, CX
+	JZ      done
+	MOVQ    CX, 64(SP)
+	PCALIGN $0x40
+
+inner_loop:
+	// stream 0, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 0
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 1
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 2
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 3
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 4
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 5
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 5
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 5
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 5
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 6
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 6
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 6
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 6
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 7
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 7
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 7
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 7
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 8
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 8
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 8
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 8
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 9
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 9
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 9
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 9
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 10
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 10
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 10
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 10
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 11
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 11
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 11
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 11
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 12
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 12
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 12
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 12
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// stream 0, lookup 13
+	MOVQ    BX, CX
+	MOVQ    R8, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R8
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// stream 1, lookup 13
+	MOVQ    BX, CX
+	MOVQ    R10, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R10
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R9)
+	ADDQ    DX, R9
+
+	// stream 2, lookup 13
+	MOVQ    BX, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R11)
+	ADDQ    DX, R11
+
+	// stream 3, lookup 13
+	MOVQ    BX, CX
+	MOVQ    R14, AX
+	SHRQ    CL, AX
+	MOVL    (SI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R14
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R13)
+	ADDQ    DX, R13
+
+	// Reload the four bit containers
+	TZCNTQ R8, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   (SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, (SP)
+	MOVQ   (DX), R8
+	ORQ    $0x01, R8
+	SHLQ   CL, R8
+	TZCNTQ R10, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   16(SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, 16(SP)
+	MOVQ   (DX), R10
+	ORQ    $0x01, R10
+	SHLQ   CL, R10
+	TZCNTQ R12, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   32(SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, 32(SP)
+	MOVQ   (DX), R12
+	ORQ    $0x01, R12
+	SHLQ   CL, R12
+	TZCNTQ R14, AX
+	MOVQ   AX, CX
+	ANDQ   $0x07, CX
+	SHRQ   $0x03, AX
+	MOVQ   48(SP), DX
+	SUBQ   AX, DX
+	MOVQ   DX, 48(SP)
+	MOVQ   (DX), R14
+	ORQ    $0x01, R14
+	SHLQ   CL, R14
+	DECQ   64(SP)
+	JNZ    inner_loop
+	JMP    outer_loop
+
+done:
+	MOVQ ctx+0(FP), AX
+	MOVQ (AX), CX
+	MOVQ (SP), DX
+	SUBQ (CX), DX
+	MOVQ DX, 24(CX)
+	MOVQ R8, 32(CX)
+	MOVQ 16(SP), DX
+	SUBQ 48(CX), DX
+	MOVQ DX, 72(CX)
+	MOVQ R10, 80(CX)
+	MOVQ 32(SP), DX
+	SUBQ 96(CX), DX
+	MOVQ DX, 120(CX)
+	MOVQ R12, 128(CX)
+	MOVQ 48(SP), DX
+	SUBQ 144(CX), DX
+	MOVQ DX, 168(CX)
+	MOVQ R14, 176(CX)
+	MOVQ 16(AX), CX
+	MOVQ 24(AX), DX
+	SUBQ CX, DI
+	MOVQ DI, 48(AX)
+	ADDQ DX, CX
+	SUBQ CX, R9
+	MOVQ R9, 56(AX)
+	ADDQ DX, CX
+	SUBQ CX, R11
+	MOVQ R11, 64(AX)
+	ADDQ DX, CX
+	SUBQ CX, R13
+	MOVQ R13, 72(AX)
+	RET
+
+// func decompress4x2_main_loop_bmi2(ctx *decompress4x2Context)
+// Requires: BMI, BMI2, CMOV
+TEXT ·decompress4x2_main_loop_bmi2(SB), $72-8
+	MOVQ ctx+0(FP), AX
+
+	// Preload values
+	MOVBQZX 8(AX), CX
+	MOVQ    40(AX), BX
+	MOVQ    16(AX), SI
+	MOVQ    24(AX), DI
+	MOVQ    32(AX), DX
+	LEAQ    (SI)(DI*1), R8
+	LEAQ    (SI)(DI*2), R10
+	LEAQ    (DI)(DI*2), R12
+	ADDQ    SI, R12
+	MOVQ    R8, 8(SP)
+	MOVQ    R10, 24(SP)
+	MOVQ    R12, 40(SP)
+	ADDQ    SI, DX
+	MOVQ    DX, 56(SP)
+
+	// Copy the input pointers to their stack slots
+	MOVQ 88(AX), DX
+	MOVQ DX, (SP)
+	MOVQ 96(AX), DX
+	MOVQ DX, 16(SP)
+	MOVQ 104(AX), DX
+	MOVQ DX, 32(SP)
+	MOVQ 112(AX), DX
+	MOVQ DX, 48(SP)
+
+	// Convert each bit reader to sentinel form: bits = value | 1<<bitsRead
+	MOVQ    (AX), AX
+	MOVQ    32(AX), DI
+	MOVBQZX 40(AX), DX
+	BTSQ    DX, DI
+	MOVQ    80(AX), R9
+	MOVBQZX 88(AX), DX
+	BTSQ    DX, R9
+	MOVQ    128(AX), R11
+	MOVBQZX 136(AX), DX
+	BTSQ    DX, R11
+	MOVQ    176(AX), R13
+	MOVBQZX 184(AX), AX
+	BTSQ    AX, R13
+
+outer_loop:
+	MOVQ ctx+0(FP), AX
+
+	// Iterations allowed by the output: min_i((end[i] - op[i]) / 16)
+	MOVQ    8(SP), DX
+	SUBQ    SI, DX
+	JLE     done
+	SHRQ    $0x04, DX
+	MOVQ    24(SP), R14
+	SUBQ    R8, R14
+	JLE     done
+	SHRQ    $0x04, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    40(SP), R14
+	SUBQ    R10, R14
+	JLE     done
+	SHRQ    $0x04, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    56(SP), R14
+	SUBQ    R12, R14
+	JLE     done
+	SHRQ    $0x04, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    (SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    16(SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    32(SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    48(SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	TESTQ   DX, DX
+	JZ      done
+	MOVQ    DX, 64(SP)
+	PCALIGN $0x40
+
+inner_loop:
+	// stream 0, lookup 0
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 0
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 0
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 0
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 1
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 1
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 1
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 1
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 2
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 2
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 2
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 2
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 3
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 3
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 3
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 3
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 4
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 4
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 4
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 4
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// Reload the four bit containers
+	TZCNTQ DI, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   (SP), DI
+	SUBQ   DX, DI
+	MOVQ   DI, (SP)
+	MOVQ   (DI), DI
+	ORQ    $0x01, DI
+	SHLXQ  AX, DI, DI
+	TZCNTQ R9, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   16(SP), R9
+	SUBQ   DX, R9
+	MOVQ   R9, 16(SP)
+	MOVQ   (R9), R9
+	ORQ    $0x01, R9
+	SHLXQ  AX, R9, R9
+	TZCNTQ R11, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   32(SP), R11
+	SUBQ   DX, R11
+	MOVQ   R11, 32(SP)
+	MOVQ   (R11), R11
+	ORQ    $0x01, R11
+	SHLXQ  AX, R11, R11
+	TZCNTQ R13, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   48(SP), R13
+	SUBQ   DX, R13
+	MOVQ   R13, 48(SP)
+	MOVQ   (R13), R13
+	ORQ    $0x01, R13
+	SHLXQ  AX, R13, R13
+	DECQ   64(SP)
+	JNZ    inner_loop
+	JMP    outer_loop
+
+done:
+	MOVQ ctx+0(FP), AX
+	MOVQ (AX), CX
+	MOVQ (SP), DX
+	SUBQ (CX), DX
+	MOVQ DX, 24(CX)
+	MOVQ DI, 32(CX)
+	MOVQ 16(SP), DX
+	SUBQ 48(CX), DX
+	MOVQ DX, 72(CX)
+	MOVQ R9, 80(CX)
+	MOVQ 32(SP), DX
+	SUBQ 96(CX), DX
+	MOVQ DX, 120(CX)
+	MOVQ R11, 128(CX)
+	MOVQ 48(SP), DX
+	SUBQ 144(CX), DX
+	MOVQ DX, 168(CX)
+	MOVQ R13, 176(CX)
+	MOVQ 16(AX), CX
+	MOVQ 24(AX), DX
+	SUBQ CX, SI
+	MOVQ SI, 48(AX)
+	ADDQ DX, CX
+	SUBQ CX, R8
+	MOVQ R8, 56(AX)
+	ADDQ DX, CX
+	SUBQ CX, R10
+	MOVQ R10, 64(AX)
+	ADDQ DX, CX
+	SUBQ CX, R12
+	MOVQ R12, 72(AX)
+	RET
+
+// func decompress4x2_8b_main_loop_bmi2(ctx *decompress4x2Context)
+// Requires: BMI, BMI2, CMOV
+TEXT ·decompress4x2_8b_main_loop_bmi2(SB), $72-8
+	MOVQ ctx+0(FP), AX
+
+	// Preload values
+	MOVBQZX 8(AX), CX
+	MOVQ    40(AX), BX
+	MOVQ    16(AX), SI
+	MOVQ    24(AX), DI
+	MOVQ    32(AX), DX
+	LEAQ    (SI)(DI*1), R8
+	LEAQ    (SI)(DI*2), R10
+	LEAQ    (DI)(DI*2), R12
+	ADDQ    SI, R12
+	MOVQ    R8, 8(SP)
+	MOVQ    R10, 24(SP)
+	MOVQ    R12, 40(SP)
+	ADDQ    SI, DX
+	MOVQ    DX, 56(SP)
+
+	// Copy the input pointers to their stack slots
+	MOVQ 88(AX), DX
+	MOVQ DX, (SP)
+	MOVQ 96(AX), DX
+	MOVQ DX, 16(SP)
+	MOVQ 104(AX), DX
+	MOVQ DX, 32(SP)
+	MOVQ 112(AX), DX
+	MOVQ DX, 48(SP)
+
+	// Convert each bit reader to sentinel form: bits = value | 1<<bitsRead
+	MOVQ    (AX), AX
+	MOVQ    32(AX), DI
+	MOVBQZX 40(AX), DX
+	BTSQ    DX, DI
+	MOVQ    80(AX), R9
+	MOVBQZX 88(AX), DX
+	BTSQ    DX, R9
+	MOVQ    128(AX), R11
+	MOVBQZX 136(AX), DX
+	BTSQ    DX, R11
+	MOVQ    176(AX), R13
+	MOVBQZX 184(AX), AX
+	BTSQ    AX, R13
+
+outer_loop:
+	MOVQ ctx+0(FP), AX
+
+	// Iterations allowed by the output: min_i((end[i] - op[i]) / 16)
+	MOVQ    8(SP), DX
+	SUBQ    SI, DX
+	JLE     done
+	SHRQ    $0x04, DX
+	MOVQ    24(SP), R14
+	SUBQ    R8, R14
+	JLE     done
+	SHRQ    $0x04, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    40(SP), R14
+	SUBQ    R10, R14
+	JLE     done
+	SHRQ    $0x04, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    56(SP), R14
+	SUBQ    R12, R14
+	JLE     done
+	SHRQ    $0x04, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    (SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    16(SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    32(SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    48(SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	TESTQ   DX, DX
+	JZ      done
+	MOVQ    DX, 64(SP)
+	PCALIGN $0x40
+
+inner_loop:
+	// stream 0, lookup 0
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 0
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 0
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 0
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 1
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 1
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 1
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 1
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 2
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 2
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 2
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 2
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 3
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 3
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 3
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 3
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 4
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 4
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 4
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 4
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 5
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 5
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 5
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 5
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 6
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 6
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 6
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 6
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// Reload the four bit containers
+	TZCNTQ DI, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   (SP), DI
+	SUBQ   DX, DI
+	MOVQ   DI, (SP)
+	MOVQ   (DI), DI
+	ORQ    $0x01, DI
+	SHLXQ  AX, DI, DI
+	TZCNTQ R9, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   16(SP), R9
+	SUBQ   DX, R9
+	MOVQ   R9, 16(SP)
+	MOVQ   (R9), R9
+	ORQ    $0x01, R9
+	SHLXQ  AX, R9, R9
+	TZCNTQ R11, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   32(SP), R11
+	SUBQ   DX, R11
+	MOVQ   R11, 32(SP)
+	MOVQ   (R11), R11
+	ORQ    $0x01, R11
+	SHLXQ  AX, R11, R11
+	TZCNTQ R13, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   48(SP), R13
+	SUBQ   DX, R13
+	MOVQ   R13, 48(SP)
+	MOVQ   (R13), R13
+	ORQ    $0x01, R13
+	SHLXQ  AX, R13, R13
+	DECQ   64(SP)
+	JNZ    inner_loop
+	JMP    outer_loop
+
+done:
+	MOVQ ctx+0(FP), AX
+	MOVQ (AX), CX
+	MOVQ (SP), DX
+	SUBQ (CX), DX
+	MOVQ DX, 24(CX)
+	MOVQ DI, 32(CX)
+	MOVQ 16(SP), DX
+	SUBQ 48(CX), DX
+	MOVQ DX, 72(CX)
+	MOVQ R9, 80(CX)
+	MOVQ 32(SP), DX
+	SUBQ 96(CX), DX
+	MOVQ DX, 120(CX)
+	MOVQ R11, 128(CX)
+	MOVQ 48(SP), DX
+	SUBQ 144(CX), DX
+	MOVQ DX, 168(CX)
+	MOVQ R13, 176(CX)
+	MOVQ 16(AX), CX
+	MOVQ 24(AX), DX
+	SUBQ CX, SI
+	MOVQ SI, 48(AX)
+	ADDQ DX, CX
+	SUBQ CX, R8
+	MOVQ R8, 56(AX)
+	ADDQ DX, CX
+	SUBQ CX, R10
+	MOVQ R10, 64(AX)
+	ADDQ DX, CX
+	SUBQ CX, R12
+	MOVQ R12, 72(AX)
+	RET
+
+// func decompress4x2_4b_main_loop_bmi2(ctx *decompress4x2Context)
+// Requires: BMI, BMI2, CMOV
+TEXT ·decompress4x2_4b_main_loop_bmi2(SB), $72-8
+	MOVQ ctx+0(FP), AX
+
+	// Preload values
+	MOVBQZX 8(AX), CX
+	MOVQ    40(AX), BX
+	MOVQ    16(AX), SI
+	MOVQ    24(AX), DI
+	MOVQ    32(AX), DX
+	LEAQ    (SI)(DI*1), R8
+	LEAQ    (SI)(DI*2), R10
+	LEAQ    (DI)(DI*2), R12
+	ADDQ    SI, R12
+	MOVQ    R8, 8(SP)
+	MOVQ    R10, 24(SP)
+	MOVQ    R12, 40(SP)
+	ADDQ    SI, DX
+	MOVQ    DX, 56(SP)
+
+	// Copy the input pointers to their stack slots
+	MOVQ 88(AX), DX
+	MOVQ DX, (SP)
+	MOVQ 96(AX), DX
+	MOVQ DX, 16(SP)
+	MOVQ 104(AX), DX
+	MOVQ DX, 32(SP)
+	MOVQ 112(AX), DX
+	MOVQ DX, 48(SP)
+
+	// Convert each bit reader to sentinel form: bits = value | 1<<bitsRead
+	MOVQ    (AX), AX
+	MOVQ    32(AX), DI
+	MOVBQZX 40(AX), DX
+	BTSQ    DX, DI
+	MOVQ    80(AX), R9
+	MOVBQZX 88(AX), DX
+	BTSQ    DX, R9
+	MOVQ    128(AX), R11
+	MOVBQZX 136(AX), DX
+	BTSQ    DX, R11
+	MOVQ    176(AX), R13
+	MOVBQZX 184(AX), AX
+	BTSQ    AX, R13
+
+outer_loop:
+	MOVQ ctx+0(FP), AX
+
+	// Iterations allowed by the output: min_i((end[i] - op[i]) / 32)
+	MOVQ    8(SP), DX
+	SUBQ    SI, DX
+	JLE     done
+	SHRQ    $0x05, DX
+	MOVQ    24(SP), R14
+	SUBQ    R8, R14
+	JLE     done
+	SHRQ    $0x05, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    40(SP), R14
+	SUBQ    R10, R14
+	JLE     done
+	SHRQ    $0x05, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    56(SP), R14
+	SUBQ    R12, R14
+	JLE     done
+	SHRQ    $0x05, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    (SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    16(SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    32(SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	MOVQ    48(SP), R14
+	SUBQ    80(AX), R14
+	SHRQ    $0x03, R14
+	CMPQ    R14, DX
+	CMOVQCS R14, DX
+	TESTQ   DX, DX
+	JZ      done
+	MOVQ    DX, 64(SP)
+	PCALIGN $0x40
+
+inner_loop:
+	// stream 0, lookup 0
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 0
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 0
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 0
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 1
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 1
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 1
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 1
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 2
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 2
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 2
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 2
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 3
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 3
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 3
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 3
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 4
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 4
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 4
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 4
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 5
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 5
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 5
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 5
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 6
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 6
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 6
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 6
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 7
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 7
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 7
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 7
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 8
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 8
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 8
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 8
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 9
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 9
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 9
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 9
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 10
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 10
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 10
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 10
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 11
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 11
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 11
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 11
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 12
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 12
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 12
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 12
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// stream 0, lookup 13
+	SHRXQ   CX, DI, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, DI, DI
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (SI)
+	ADDQ    DX, SI
+
+	// stream 1, lookup 13
+	SHRXQ   CX, R9, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R9, R9
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// stream 2, lookup 13
+	SHRXQ   CX, R11, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R10)
+	ADDQ    DX, R10
+
+	// stream 3, lookup 13
+	SHRXQ   CX, R13, AX
+	MOVL    (BX)(AX*4), AX
+	SHLXQ   AX, R13, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R12)
+	ADDQ    DX, R12
+
+	// Reload the four bit containers
+	TZCNTQ DI, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   (SP), DI
+	SUBQ   DX, DI
+	MOVQ   DI, (SP)
+	MOVQ   (DI), DI
+	ORQ    $0x01, DI
+	SHLXQ  AX, DI, DI
+	TZCNTQ R9, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   16(SP), R9
+	SUBQ   DX, R9
+	MOVQ   R9, 16(SP)
+	MOVQ   (R9), R9
+	ORQ    $0x01, R9
+	SHLXQ  AX, R9, R9
+	TZCNTQ R11, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   32(SP), R11
+	SUBQ   DX, R11
+	MOVQ   R11, 32(SP)
+	MOVQ   (R11), R11
+	ORQ    $0x01, R11
+	SHLXQ  AX, R11, R11
+	TZCNTQ R13, DX
+	MOVQ   DX, AX
+	ANDQ   $0x07, AX
+	SHRQ   $0x03, DX
+	MOVQ   48(SP), R13
+	SUBQ   DX, R13
+	MOVQ   R13, 48(SP)
+	MOVQ   (R13), R13
+	ORQ    $0x01, R13
+	SHLXQ  AX, R13, R13
+	DECQ   64(SP)
+	JNZ    inner_loop
+	JMP    outer_loop
+
+done:
+	MOVQ ctx+0(FP), AX
+	MOVQ (AX), CX
+	MOVQ (SP), DX
+	SUBQ (CX), DX
+	MOVQ DX, 24(CX)
+	MOVQ DI, 32(CX)
+	MOVQ 16(SP), DX
+	SUBQ 48(CX), DX
+	MOVQ DX, 72(CX)
+	MOVQ R9, 80(CX)
+	MOVQ 32(SP), DX
+	SUBQ 96(CX), DX
+	MOVQ DX, 120(CX)
+	MOVQ R11, 128(CX)
+	MOVQ 48(SP), DX
+	SUBQ 144(CX), DX
+	MOVQ DX, 168(CX)
+	MOVQ R13, 176(CX)
+	MOVQ 16(AX), CX
+	MOVQ 24(AX), DX
+	SUBQ CX, SI
+	MOVQ SI, 48(AX)
+	ADDQ DX, CX
+	SUBQ CX, R8
+	MOVQ R8, 56(AX)
+	ADDQ DX, CX
+	SUBQ CX, R10
+	MOVQ R10, 64(AX)
+	ADDQ DX, CX
+	SUBQ CX, R12
+	MOVQ R12, 72(AX)
+	RET
+
+// func decompress1x2_main_loop_amd64(ctx *decompress1x2Context)
+// Requires: CMOV
+TEXT ·decompress1x2_main_loop_amd64(SB), $0-8
+	MOVQ ctx+0(FP), BX
+
+	// Preload values
+	MOVBQZX 8(BX), SI
+	MOVQ    32(BX), DI
+	MOVQ    16(BX), R8
+	MOVQ    24(BX), R9
+	ADDQ    R8, R9
+	MOVQ    56(BX), R10
+	MOVQ    48(BX), R11
+	MOVQ    (BX), AX
+	MOVQ    32(AX), R12
+	MOVBQZX 40(AX), R13
+
+outer_loop:
+	// Iterations allowed by the output: (limit - op) / 16
+	MOVQ    R9, R14
+	SUBQ    R8, R14
+	JLE     done
+	SHRQ    $0x04, R14
+	MOVQ    R10, AX
+	SUBQ    R11, AX
+	SHRQ    $0x03, AX
+	CMPQ    AX, R14
+	CMOVQCS AX, R14
+	TESTQ   R14, R14
+	JZ      done
+	PCALIGN $0x40
+
+inner_loop:
+	// lookup 0
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 1
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 2
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 3
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 4
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// Refill the whole bytes consumed from below the window
+	MOVQ R13, AX
+	ANDQ $0x38, AX
+	MOVQ -8(R10), DX
+	SHRQ $0x01, DX
+	ANDQ $0x07, R13
+	MOVQ AX, CX
+	XORQ $0x3f, CX
+	SHRQ CL, DX
+	MOVQ R13, CX
+	SHLQ CL, DX
+	ORQ  DX, R12
+	SHRQ $0x03, AX
+	SUBQ AX, R10
+	DECQ R14
+	JNZ  inner_loop
+	JMP  outer_loop
+
+done:
+	MOVQ (BX), AX
+	SUBQ (AX), R10
+	MOVQ R10, 24(AX)
+	MOVQ R12, 32(AX)
+	MOVB R13, 40(AX)
+	SUBQ 16(BX), R8
+	MOVQ R8, 40(BX)
+	RET
+
+// func decompress1x2_8b_main_loop_amd64(ctx *decompress1x2Context)
+// Requires: CMOV
+TEXT ·decompress1x2_8b_main_loop_amd64(SB), $0-8
+	MOVQ ctx+0(FP), BX
+
+	// Preload values
+	MOVBQZX 8(BX), SI
+	MOVQ    32(BX), DI
+	MOVQ    16(BX), R8
+	MOVQ    24(BX), R9
+	ADDQ    R8, R9
+	MOVQ    56(BX), R10
+	MOVQ    48(BX), R11
+	MOVQ    (BX), AX
+	MOVQ    32(AX), R12
+	MOVBQZX 40(AX), R13
+
+outer_loop:
+	// Iterations allowed by the output: (limit - op) / 16
+	MOVQ    R9, R14
+	SUBQ    R8, R14
+	JLE     done
+	SHRQ    $0x04, R14
+	MOVQ    R10, AX
+	SUBQ    R11, AX
+	SHRQ    $0x03, AX
+	CMPQ    AX, R14
+	CMOVQCS AX, R14
+	TESTQ   R14, R14
+	JZ      done
+	PCALIGN $0x40
+
+inner_loop:
+	// lookup 0
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 1
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 2
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 3
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 4
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 5
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 6
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// Refill the whole bytes consumed from below the window
+	MOVQ R13, AX
+	ANDQ $0x38, AX
+	MOVQ -8(R10), DX
+	SHRQ $0x01, DX
+	ANDQ $0x07, R13
+	MOVQ AX, CX
+	XORQ $0x3f, CX
+	SHRQ CL, DX
+	MOVQ R13, CX
+	SHLQ CL, DX
+	ORQ  DX, R12
+	SHRQ $0x03, AX
+	SUBQ AX, R10
+	DECQ R14
+	JNZ  inner_loop
+	JMP  outer_loop
+
+done:
+	MOVQ (BX), AX
+	SUBQ (AX), R10
+	MOVQ R10, 24(AX)
+	MOVQ R12, 32(AX)
+	MOVB R13, 40(AX)
+	SUBQ 16(BX), R8
+	MOVQ R8, 40(BX)
+	RET
+
+// func decompress1x2_4b_main_loop_amd64(ctx *decompress1x2Context)
+// Requires: CMOV
+TEXT ·decompress1x2_4b_main_loop_amd64(SB), $0-8
+	MOVQ ctx+0(FP), BX
+
+	// Preload values
+	MOVBQZX 8(BX), SI
+	MOVQ    32(BX), DI
+	MOVQ    16(BX), R8
+	MOVQ    24(BX), R9
+	ADDQ    R8, R9
+	MOVQ    56(BX), R10
+	MOVQ    48(BX), R11
+	MOVQ    (BX), AX
+	MOVQ    32(AX), R12
+	MOVBQZX 40(AX), R13
+
+outer_loop:
+	// Iterations allowed by the output: (limit - op) / 32
+	MOVQ    R9, R14
+	SUBQ    R8, R14
+	JLE     done
+	SHRQ    $0x05, R14
+	MOVQ    R10, AX
+	SUBQ    R11, AX
+	SHRQ    $0x03, AX
+	CMPQ    AX, R14
+	CMOVQCS AX, R14
+	TESTQ   R14, R14
+	JZ      done
+	PCALIGN $0x40
+
+inner_loop:
+	// lookup 0
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 1
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 2
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 3
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 4
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 5
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 6
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 7
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 8
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 9
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 10
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 11
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 12
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// lookup 13
+	MOVQ    SI, CX
+	MOVQ    R12, AX
+	SHRQ    CL, AX
+	MOVL    (DI)(AX*4), AX
+	MOVQ    AX, CX
+	SHLQ    CL, R12
+	ADDQ    AX, R13
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (R8)
+	ADDQ    DX, R8
+
+	// Refill the whole bytes consumed from below the window
+	MOVQ R13, AX
+	ANDQ $0x38, AX
+	MOVQ -8(R10), DX
+	SHRQ $0x01, DX
+	ANDQ $0x07, R13
+	MOVQ AX, CX
+	XORQ $0x3f, CX
+	SHRQ CL, DX
+	MOVQ R13, CX
+	SHLQ CL, DX
+	ORQ  DX, R12
+	SHRQ $0x03, AX
+	SUBQ AX, R10
+	DECQ R14
+	JNZ  inner_loop
+	JMP  outer_loop
+
+done:
+	MOVQ (BX), AX
+	SUBQ (AX), R10
+	MOVQ R10, 24(AX)
+	MOVQ R12, 32(AX)
+	MOVB R13, 40(AX)
+	SUBQ 16(BX), R8
+	MOVQ R8, 40(BX)
+	RET
+
+// func decompress1x2_main_loop_bmi2(ctx *decompress1x2Context)
+// Requires: BMI2, CMOV
+TEXT ·decompress1x2_main_loop_bmi2(SB), $0-8
+	MOVQ ctx+0(FP), CX
+
+	// Preload values
+	MOVBQZX 8(CX), BX
+	MOVQ    32(CX), SI
+	MOVQ    16(CX), DI
+	MOVQ    24(CX), R8
+	ADDQ    DI, R8
+	MOVQ    56(CX), R9
+	MOVQ    48(CX), R10
+	MOVQ    (CX), AX
+	MOVQ    32(AX), R11
+	MOVBQZX 40(AX), R12
+
+outer_loop:
+	// Iterations allowed by the output: (limit - op) / 16
+	MOVQ    R8, R13
+	SUBQ    DI, R13
+	JLE     done
+	SHRQ    $0x04, R13
+	MOVQ    R9, AX
+	SUBQ    R10, AX
+	SHRQ    $0x03, AX
+	CMPQ    AX, R13
+	CMOVQCS AX, R13
+	TESTQ   R13, R13
+	JZ      done
+	PCALIGN $0x40
+
+inner_loop:
+	// lookup 0
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 1
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 2
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 3
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 4
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// Refill the whole bytes consumed from below the window
+	MOVQ  R12, AX
+	ANDQ  $0x38, AX
+	MOVQ  -8(R9), DX
+	SHRQ  $0x01, DX
+	ANDQ  $0x07, R12
+	MOVQ  AX, R14
+	XORQ  $0x3f, R14
+	SHRXQ R14, DX, DX
+	SHLXQ R12, DX, DX
+	ORQ   DX, R11
+	SHRQ  $0x03, AX
+	SUBQ  AX, R9
+	DECQ  R13
+	JNZ   inner_loop
+	JMP   outer_loop
+
+done:
+	MOVQ (CX), AX
+	SUBQ (AX), R9
+	MOVQ R9, 24(AX)
+	MOVQ R11, 32(AX)
+	MOVB R12, 40(AX)
+	SUBQ 16(CX), DI
+	MOVQ DI, 40(CX)
+	RET
+
+// func decompress1x2_8b_main_loop_bmi2(ctx *decompress1x2Context)
+// Requires: BMI2, CMOV
+TEXT ·decompress1x2_8b_main_loop_bmi2(SB), $0-8
+	MOVQ ctx+0(FP), CX
+
+	// Preload values
+	MOVBQZX 8(CX), BX
+	MOVQ    32(CX), SI
+	MOVQ    16(CX), DI
+	MOVQ    24(CX), R8
+	ADDQ    DI, R8
+	MOVQ    56(CX), R9
+	MOVQ    48(CX), R10
+	MOVQ    (CX), AX
+	MOVQ    32(AX), R11
+	MOVBQZX 40(AX), R12
+
+outer_loop:
+	// Iterations allowed by the output: (limit - op) / 16
+	MOVQ    R8, R13
+	SUBQ    DI, R13
+	JLE     done
+	SHRQ    $0x04, R13
+	MOVQ    R9, AX
+	SUBQ    R10, AX
+	SHRQ    $0x03, AX
+	CMPQ    AX, R13
+	CMOVQCS AX, R13
+	TESTQ   R13, R13
+	JZ      done
+	PCALIGN $0x40
+
+inner_loop:
+	// lookup 0
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 1
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 2
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 3
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 4
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 5
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 6
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// Refill the whole bytes consumed from below the window
+	MOVQ  R12, AX
+	ANDQ  $0x38, AX
+	MOVQ  -8(R9), DX
+	SHRQ  $0x01, DX
+	ANDQ  $0x07, R12
+	MOVQ  AX, R14
+	XORQ  $0x3f, R14
+	SHRXQ R14, DX, DX
+	SHLXQ R12, DX, DX
+	ORQ   DX, R11
+	SHRQ  $0x03, AX
+	SUBQ  AX, R9
+	DECQ  R13
+	JNZ   inner_loop
+	JMP   outer_loop
+
+done:
+	MOVQ (CX), AX
+	SUBQ (AX), R9
+	MOVQ R9, 24(AX)
+	MOVQ R11, 32(AX)
+	MOVB R12, 40(AX)
+	SUBQ 16(CX), DI
+	MOVQ DI, 40(CX)
+	RET
+
+// func decompress1x2_4b_main_loop_bmi2(ctx *decompress1x2Context)
+// Requires: BMI2, CMOV
+TEXT ·decompress1x2_4b_main_loop_bmi2(SB), $0-8
+	MOVQ ctx+0(FP), CX
+
+	// Preload values
+	MOVBQZX 8(CX), BX
+	MOVQ    32(CX), SI
+	MOVQ    16(CX), DI
+	MOVQ    24(CX), R8
+	ADDQ    DI, R8
+	MOVQ    56(CX), R9
+	MOVQ    48(CX), R10
+	MOVQ    (CX), AX
+	MOVQ    32(AX), R11
+	MOVBQZX 40(AX), R12
+
+outer_loop:
+	// Iterations allowed by the output: (limit - op) / 32
+	MOVQ    R8, R13
+	SUBQ    DI, R13
+	JLE     done
+	SHRQ    $0x05, R13
+	MOVQ    R9, AX
+	SUBQ    R10, AX
+	SHRQ    $0x03, AX
+	CMPQ    AX, R13
+	CMOVQCS AX, R13
+	TESTQ   R13, R13
+	JZ      done
+	PCALIGN $0x40
+
+inner_loop:
+	// lookup 0
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 1
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 2
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 3
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 4
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 5
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 6
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 7
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 8
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 9
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 10
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 11
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 12
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// lookup 13
+	SHRXQ   BX, R11, AX
+	MOVL    (SI)(AX*4), AX
+	SHLXQ   AX, R11, R11
+	ADDQ    AX, R12
+	MOVBLZX AH, DX
+	SHRQ    $0x10, AX
+	MOVW    AX, (DI)
+	ADDQ    DX, DI
+
+	// Refill the whole bytes consumed from below the window
+	MOVQ  R12, AX
+	ANDQ  $0x38, AX
+	MOVQ  -8(R9), DX
+	SHRQ  $0x01, DX
+	ANDQ  $0x07, R12
+	MOVQ  AX, R14
+	XORQ  $0x3f, R14
+	SHRXQ R14, DX, DX
+	SHLXQ R12, DX, DX
+	ORQ   DX, R11
+	SHRQ  $0x03, AX
+	SUBQ  AX, R9
+	DECQ  R13
+	JNZ   inner_loop
+	JMP   outer_loop
+
+done:
+	MOVQ (CX), AX
+	SUBQ (AX), R9
+	MOVQ R9, 24(AX)
+	MOVQ R11, 32(AX)
+	MOVB R12, 40(AX)
+	SUBQ 16(CX), DI
+	MOVQ DI, 40(CX)
+	RET

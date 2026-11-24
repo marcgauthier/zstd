@@ -408,6 +408,9 @@ func (b *blockDec) decodeLiterals(in []byte, hist *history) (remain []byte, err 
 		// Decoder.Decompress* uses cap(dst) for the size limit. Do not write
 		// MaxDecodedSize on hist.huffTree: with a trained dictionary that
 		// pointer aliases the shared dict.litEnc and concurrent DecodeAll races.
+		if hist.dict == nil || huff != hist.dict.litEnc {
+			huff.EnsureDouble(litRegenSize, fourStreams)
+		}
 		if fourStreams {
 			literals, err = huff.Decoder().Decompress4X(b.literalBuf[:0:litRegenSize], literals)
 		} else {
@@ -446,6 +449,7 @@ func (b *blockDec) decodeLiterals(in []byte, hist *history) (remain []byte, err 
 				huff = &huff0.Scratch{}
 			}
 		}
+		huff.DecodeOnly = true
 		var err error
 		if debugDecoder {
 			println("huff table input:", len(literals), "CRC:", crc32.ChecksumIEEE(literals))
@@ -457,6 +461,7 @@ func (b *blockDec) decodeLiterals(in []byte, hist *history) (remain []byte, err 
 		}
 		hist.huffTree = huff
 		huff.MaxDecodedSize = litRegenSize
+		huff.EnsureDouble(litRegenSize, fourStreams)
 		// Use our out buffer.
 		if fourStreams {
 			literals, err = huff.Decoder().Decompress4X(b.literalBuf[:0:litRegenSize], literals)

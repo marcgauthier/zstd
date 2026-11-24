@@ -94,6 +94,7 @@ func loadDict(b []byte) (*dict, error) {
 		return nil, fmt.Errorf("loading literal table: %w", err)
 	}
 	d.litEnc.Reuse = huff0.ReusePolicyMust
+	d.litEnc.EnsureDouble(1<<20, false)
 
 	br := byteReader{
 		b:   b,

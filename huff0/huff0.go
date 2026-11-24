@@ -111,6 +111,10 @@ type Scratch struct {
 	// from the input size. This is slower.
 	OptimalDepth bool
 
+	// DecodeOnly skips building the encoder cTable during ReadTable when the
+	// Scratch will only be used for decoding.
+	DecodeOnly bool
+
 	symbolLen      uint16 // Length of active part of the symbol table.
 	maxCount       int    // count of the most probable symbol
 	clearCount     bool   // clear count
@@ -122,6 +126,7 @@ type Scratch struct {
 	oldTableLog    uint8
 	canRestore     bool   // oldTable can be restored.
 	dt             dTable // decompression table
+	rankStart      [tableLogMax + 2]uint32
 	nodes          []nodeElt
 	tmpOut         [4][]byte
 	fse            *fse.Scratch

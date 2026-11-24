@@ -41,6 +41,7 @@
 // updating v1, v2, v3, and v4. It assumes that there is at least one block
 // to process.
 #define blockLoop() \
+	PCALIGN $32    \
 loop:  \
 	MOVQ +0(p), x  \
 	round(v1, x)   \
@@ -170,6 +171,51 @@ finalize:
 	MOVQ h, ret+24(FP)
 	RET
 
+// block32 processes one 32-byte stripe across v1..v4 using four independent
+// scratch registers (R12, CX, DX, R15) to expose full ILP.
+#define block32(off) \
+	MOVQ  (off+0)(p), R12  \
+	MOVQ  (off+8)(p), CX   \
+	MOVQ  (off+16)(p), DX  \
+	MOVQ  (off+24)(p), R15 \
+	IMULQ prime2, R12      \
+	IMULQ prime2, CX       \
+	IMULQ prime2, DX       \
+	IMULQ prime2, R15      \
+	ADDQ  R12, v1          \
+	ADDQ  CX, v2           \
+	ADDQ  DX, v3           \
+	ADDQ  R15, v4          \
+	ROLQ  $31, v1          \
+	ROLQ  $31, v2          \
+	ROLQ  $31, v3          \
+	ROLQ  $31, v4          \
+	IMULQ prime1, v1       \
+	IMULQ prime1, v2       \
+	IMULQ prime1, v3       \
+	IMULQ prime1, v4
+
+// blockLoopWrite processes 64 bytes per iteration (2x unrolled), then any
+// trailing 32-byte block. Clobbers CX, DX, R12, R15.
+#define blockLoopWrite() \
+	SUBQ $32, end        \
+	CMPQ p, end          \
+	JG   wb_rem32        \
+	PCALIGN $32          \
+wb_loop64:               \
+	block32(0)           \
+	block32(32)          \
+	ADDQ $64, p          \
+	CMPQ p, end          \
+	JLE  wb_loop64       \
+wb_rem32:                \
+	ADDQ $32, end        \
+	CMPQ p, end          \
+	JG   wb_done         \
+	block32(0)           \
+	ADDQ $32, p          \
+wb_done:
+
 // func writeBlocks(d *Digest, b []byte) int
 //
 // Deliberately not NOSPLIT: the stack check is the preemption point that lets a
@@ -195,7 +241,7 @@ TEXT ·writeBlocks(SB), $128-40
 
 	// We don't need to check the loop condition here; this function is
 	// always called with at least one block of data to process.
-	blockLoop()
+	blockLoopWrite()
 
 	// Copy vN back to d.
 	MOVQ v1, 0(d)

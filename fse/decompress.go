@@ -1,6 +1,7 @@
 package fse
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -179,8 +180,9 @@ type decSymbol struct {
 // allocDtable will allocate decoding tables if they are not big enough.
 func (s *Scratch) allocDtable() {
 	tableSize := 1 << s.actualTableLog
-	if cap(s.decTable) < tableSize {
-		s.decTable = make([]decSymbol, tableSize)
+	allocSize := max(tableSize, 256)
+	if cap(s.decTable) < allocSize {
+		s.decTable = make([]decSymbol, allocSize)
 	}
 	s.decTable = s.decTable[:tableSize]
 
@@ -200,15 +202,17 @@ func (s *Scratch) buildDtable() error {
 	tableSize := uint32(1 << s.actualTableLog)
 	highThreshold := tableSize - 1
 	s.allocDtable()
+	dt := s.decTable[:tableSize]
+	norm := s.norm[:s.symbolLen]
 	symbolNext := s.ct.stateTable[:256]
 
 	// Init, lay down lowprob symbols
 	s.zeroBits = false
 	{
 		largeLimit := int16(1 << (s.actualTableLog - 1))
-		for i, v := range s.norm[:s.symbolLen] {
+		for i, v := range norm {
 			if v == -1 {
-				s.decTable[highThreshold].symbol = uint8(i)
+				dt[highThreshold].symbol = uint8(i)
 				highThreshold--
 				symbolNext[i] = 1
 			} else {
@@ -224,13 +228,30 @@ func (s *Scratch) buildDtable() error {
 		tableMask := tableSize - 1
 		step := tableStep(tableSize)
 		position := uint32(0)
-		for ss, v := range s.norm[:s.symbolLen] {
-			for i := 0; i < int(v); i++ {
-				s.decTable[position].symbol = uint8(ss)
-				position = (position + step) & tableMask
-				for position > highThreshold {
-					// lowprob area
+		if highThreshold == tableMask {
+			for ss, v := range norm {
+				if v <= 0 {
+					continue
+				}
+				sym := uint8(ss)
+				for range int(v) {
+					dt[position].symbol = sym
 					position = (position + step) & tableMask
+				}
+			}
+		} else {
+			for ss, v := range norm {
+				if v <= 0 {
+					continue
+				}
+				sym := uint8(ss)
+				for range int(v) {
+					dt[position].symbol = sym
+					position = (position + step) & tableMask
+					for position > highThreshold {
+						// lowprob area
+						position = (position + step) & tableMask
+					}
 				}
 			}
 		}
@@ -243,12 +264,12 @@ func (s *Scratch) buildDtable() error {
 	// Build Decoding table
 	{
 		tableSize := uint16(1 << s.actualTableLog)
-		for u, v := range s.decTable {
-			symbol := v.symbol
+		tl := s.actualTableLog
+		for u := range dt {
+			symbol := dt[u].symbol
 			nextState := symbolNext[symbol]
 			symbolNext[symbol] = nextState + 1
-			nBits := s.actualTableLog - byte(highBits(uint32(nextState)))
-			s.decTable[u].nbBits = nBits
+			nBits := tl - byte(highBits(uint32(nextState)))
 			newState := (nextState << nBits) - tableSize
 			if newState >= tableSize {
 				return fmt.Errorf("newState (%d) outside table size (%d)", newState, tableSize)
@@ -257,7 +278,11 @@ func (s *Scratch) buildDtable() error {
 				// Seems weird that this is possible with nbits > 0.
 				return fmt.Errorf("newState (%d) == oldState (%d) and no bits", newState, u)
 			}
-			s.decTable[u].newState = newState
+			dt[u] = decSymbol{
+				newState: newState,
+				symbol:   symbol,
+				nbBits:   nBits,
+			}
 		}
 	}
 	return nil
@@ -271,10 +296,138 @@ func (s *Scratch) decompress() error {
 		return err
 	}
 
-	var s1, s2 decoder
-	// Initialize and decode first state and symbol.
-	s1.init(br, s.decTable, s.actualTableLog)
-	s2.init(br, s.decTable, s.actualTableLog)
+	tl := s.actualTableLog
+	dt := s.decTable[:1<<tl]
+	st1 := br.getBits(tl)
+	st2 := br.getBits(tl)
+
+	in := br.in
+	brOff := br.off
+	brVal := br.value
+	bitsRead := br.bitsRead
+	limit := s.DecompressLimit
+
+	// Fast path when output buffer already has capacity (e.g. huff0 weights)
+	// and tableLog <= 8 (4 symbols consume <= 32 bits, needing 1 refill per 4).
+	if tl <= 8 && cap(s.Out) >= limit {
+		dt256 := s.decTable[:256]
+		out := s.Out[:cap(s.Out)]
+		pos := len(s.Out)
+		for brOff >= 4 {
+			if bitsRead >= 32 {
+				brOff -= 4
+				brVal = (brVal << 32) | uint64(binary.LittleEndian.Uint32(in[brOff:]))
+				bitsRead -= 32
+			}
+			if pos+4 > limit {
+				// Leave remaining bytes to the exact tail loop below.
+				break
+			}
+			n0 := dt256[uint8(st1)]
+			st1 = n0.newState + uint16(((brVal<<(bitsRead&63))>>1)>>((63-n0.nbBits)&63))
+			bitsRead += n0.nbBits
+
+			n1 := dt256[uint8(st2)]
+			st2 = n1.newState + uint16(((brVal<<(bitsRead&63))>>1)>>((63-n1.nbBits)&63))
+			bitsRead += n1.nbBits
+
+			n2 := dt256[uint8(st1)]
+			st1 = n2.newState + uint16(((brVal<<(bitsRead&63))>>1)>>((63-n2.nbBits)&63))
+			bitsRead += n2.nbBits
+
+			n3 := dt256[uint8(st2)]
+			st2 = n3.newState + uint16(((brVal<<(bitsRead&63))>>1)>>((63-n3.nbBits)&63))
+			bitsRead += n3.nbBits
+
+			binary.LittleEndian.PutUint32(out[pos:], uint32(n0.symbol)|uint32(n1.symbol)<<8|uint32(n2.symbol)<<16|uint32(n3.symbol)<<24)
+			pos += 4
+		}
+		// Tail loop writing directly into out without append overhead.
+		for {
+			if bitsRead >= 64 && brOff == 0 && dt[st1].nbBits > 0 {
+				if pos+2 <= len(out) {
+					out[pos] = dt[st1].symbol
+					out[pos+1] = dt[st2].symbol
+					s.Out = out[:pos+2]
+				} else {
+					s.Out = append(out[:pos], dt[st1].symbol, dt[st2].symbol)
+				}
+				br.off = brOff
+				br.value = brVal
+				br.bitsRead = bitsRead
+				return br.close()
+			}
+			if bitsRead >= 32 {
+				if brOff > 4 {
+					brOff -= 4
+					brVal = (brVal << 32) | uint64(binary.LittleEndian.Uint32(in[brOff:]))
+					bitsRead -= 32
+				} else {
+					for brOff > 0 {
+						brOff--
+						brVal = (brVal << 8) | uint64(in[brOff])
+						bitsRead -= 8
+					}
+				}
+			}
+			n := dt[st1]
+			nb := n.nbBits
+			var low uint16
+			if nb > 0 && bitsRead < 64 {
+				low = uint16((brVal << (bitsRead & 63)) >> ((64 - nb) & 63))
+				bitsRead += nb
+			}
+			st1 = n.newState + low
+			if pos < len(out) {
+				out[pos] = n.symbol
+				pos++
+			} else {
+				out = append(out[:pos], n.symbol)
+				out = out[:cap(out)]
+				pos++
+			}
+
+			if bitsRead >= 64 && brOff == 0 && dt[st2].nbBits > 0 {
+				if pos+2 <= len(out) {
+					out[pos] = dt[st2].symbol
+					out[pos+1] = dt[st1].symbol
+					s.Out = out[:pos+2]
+				} else {
+					s.Out = append(out[:pos], dt[st2].symbol, dt[st1].symbol)
+				}
+				br.off = brOff
+				br.value = brVal
+				br.bitsRead = bitsRead
+				return br.close()
+			}
+			n = dt[st2]
+			nb = n.nbBits
+			low = 0
+			if nb > 0 && bitsRead < 64 {
+				low = uint16((brVal << (bitsRead & 63)) >> ((64 - nb) & 63))
+				bitsRead += nb
+			}
+			st2 = n.newState + low
+			if pos < len(out) {
+				out[pos] = n.symbol
+				pos++
+			} else {
+				out = append(out[:pos], n.symbol)
+				out = out[:cap(out)]
+				pos++
+			}
+			if pos >= limit {
+				s.Out = out[:pos]
+				return fmt.Errorf("output size (%d) > DecompressLimit (%d)", pos, limit)
+			}
+		}
+	}
+
+	br.off = brOff
+	br.value = brVal
+	br.bitsRead = bitsRead
+	s1 := decoder{state: st1, br: br, dt: dt}
+	s2 := decoder{state: st2, br: br, dt: dt}
 
 	// Use temp table to avoid bound checks/append penalty.
 	var tmp = s.ct.tableSymbol[:256]
